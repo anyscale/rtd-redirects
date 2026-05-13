@@ -1,0 +1,362 @@
+"""Tests for rtd_redirects.parse: YAML reading and schema validation."""
+
+from __future__ import annotations
+
+from pathlib import Path
+from textwrap import dedent
+
+import pytest
+
+from rtd_redirects.parse import ParseError, parse_file, parse_files
+
+
+def _write(tmp_path: Path, name: str, content: str) -> Path:
+    p = tmp_path / name
+    p.write_text(dedent(content).lstrip("\n"))
+    return p
+
+
+def test_minimal_canonical_entry(tmp_path: Path):
+    f = _write(tmp_path, "redirects.yaml", """
+        schema_version: 1
+        redirects:
+          - from: /old.html
+            to:   /new.html
+            type: exact
+    """)
+    rs = parse_file(f)
+    assert len(rs) == 1
+    r = next(iter(rs))
+    assert (r.from_url, r.to_url, r.type) == ("/old.html", "/new.html", "exact")
+    assert r.http_status == 301
+    assert r.force is False
+    assert r.enabled is True
+    assert r.description == ""
+    assert r.position == 0
+
+
+def test_full_entry_fields(tmp_path: Path):
+    f = _write(tmp_path, "redirects.yaml", """
+        schema_version: 1
+        redirects:
+          - from: /a
+            to:   /b
+            type: page
+            status: 302
+            force: true
+            enabled: false
+            position: 7
+            description: "operator note"
+    """)
+    r = next(iter(parse_file(f)))
+    assert r.http_status == 302
+    assert r.force is True
+    assert r.enabled is False
+    assert r.position == 7
+    assert r.description == "operator note"
+
+
+def test_position_defaults_to_entry_index(tmp_path: Path):
+    f = _write(tmp_path, "redirects.yaml", """
+        schema_version: 1
+        redirects:
+          - from: /a
+            to:   /b
+            type: exact
+          - from: /c
+            to:   /d
+            type: exact
+          - from: /e
+            to:   /f
+            type: exact
+    """)
+    rs = parse_file(f)
+    positions = [r.position for r in rs]  # iter is position-sorted
+    assert positions == [0, 1, 2]
+
+
+def test_explicit_position_overrides_index(tmp_path: Path):
+    f = _write(tmp_path, "redirects.yaml", """
+        schema_version: 1
+        redirects:
+          - from: /a
+            to:   /b
+            type: exact
+            position: 10
+          - from: /c
+            to:   /d
+            type: exact
+            position: 5
+    """)
+    rs = parse_file(f)
+    from_urls = [r.from_url for r in rs]  # position-sorted iteration
+    assert from_urls == ["/c", "/a"]
+
+
+def test_null_description_becomes_empty(tmp_path: Path):
+    f = _write(tmp_path, "redirects.yaml", """
+        schema_version: 1
+        redirects:
+          - from: /a
+            to:   /b
+            type: exact
+            description: null
+    """)
+    r = next(iter(parse_file(f)))
+    assert r.description == ""
+
+
+def test_empty_redirects_list(tmp_path: Path):
+    f = _write(tmp_path, "redirects.yaml", """
+        schema_version: 1
+        redirects: []
+    """)
+    assert len(parse_file(f)) == 0
+
+
+def test_missing_redirects_key(tmp_path: Path):
+    f = _write(tmp_path, "redirects.yaml", "schema_version: 1\n")
+    assert len(parse_file(f)) == 0
+
+
+def test_empty_file(tmp_path: Path):
+    f = _write(tmp_path, "empty.yaml", "")
+    assert len(parse_file(f)) == 0
+
+
+class TestSchemaVersion:
+    def test_missing_raises(self, tmp_path: Path):
+        f = _write(tmp_path, "r.yaml", "redirects: []\n")
+        with pytest.raises(ParseError, match="schema_version' is required"):
+            parse_file(f)
+
+    def test_unsupported_value_raises(self, tmp_path: Path):
+        f = _write(tmp_path, "r.yaml", "schema_version: 2\nredirects: []\n")
+        with pytest.raises(ParseError, match="unsupported schema_version"):
+            parse_file(f)
+
+    def test_non_integer_raises(self, tmp_path: Path):
+        f = _write(tmp_path, "r.yaml", "schema_version: '1'\nredirects: []\n")
+        with pytest.raises(ParseError, match="unsupported schema_version"):
+            parse_file(f)
+
+
+class TestStructureValidation:
+    def test_top_level_not_mapping(self, tmp_path: Path):
+        f = _write(tmp_path, "r.yaml", "- just\n- a\n- list\n")
+        with pytest.raises(ParseError, match="top-level must be a mapping"):
+            parse_file(f)
+
+    def test_redirects_not_list(self, tmp_path: Path):
+        f = _write(tmp_path, "r.yaml", "schema_version: 1\nredirects: 'oops'\n")
+        with pytest.raises(ParseError, match="'redirects' must be a list"):
+            parse_file(f)
+
+    def test_entry_not_mapping(self, tmp_path: Path):
+        f = _write(tmp_path, "r.yaml", """
+            schema_version: 1
+            redirects:
+              - "just a string"
+        """)
+        with pytest.raises(ParseError, match=r"redirects\[0\] must be a mapping"):
+            parse_file(f)
+
+    def test_invalid_yaml(self, tmp_path: Path):
+        f = _write(tmp_path, "r.yaml", "schema_version: 1\nredirects:\n  - {unbalanced\n")
+        with pytest.raises(ParseError, match="YAML parse error"):
+            parse_file(f)
+
+    def test_missing_file(self, tmp_path: Path):
+        with pytest.raises(ParseError, match="cannot read"):
+            parse_file(tmp_path / "does-not-exist.yaml")
+
+
+class TestEntryValidation:
+    def test_missing_from_raises(self, tmp_path: Path):
+        f = _write(tmp_path, "r.yaml", """
+            schema_version: 1
+            redirects:
+              - to: /b
+                type: exact
+        """)
+        with pytest.raises(ParseError, match="missing required field 'from'"):
+            parse_file(f)
+
+    def test_missing_to_raises(self, tmp_path: Path):
+        f = _write(tmp_path, "r.yaml", """
+            schema_version: 1
+            redirects:
+              - from: /a
+                type: exact
+        """)
+        with pytest.raises(ParseError, match="missing required field 'to'"):
+            parse_file(f)
+
+    def test_missing_type_raises(self, tmp_path: Path):
+        f = _write(tmp_path, "r.yaml", """
+            schema_version: 1
+            redirects:
+              - from: /a
+                to: /b
+        """)
+        with pytest.raises(ParseError, match="missing required field 'type'"):
+            parse_file(f)
+
+    def test_from_must_be_string(self, tmp_path: Path):
+        f = _write(tmp_path, "r.yaml", """
+            schema_version: 1
+            redirects:
+              - from: 42
+                to: /b
+                type: exact
+        """)
+        with pytest.raises(ParseError, match="'from' must be a string"):
+            parse_file(f)
+
+    def test_invalid_type_value(self, tmp_path: Path):
+        f = _write(tmp_path, "r.yaml", """
+            schema_version: 1
+            redirects:
+              - from: /a
+                to: /b
+                type: bogus
+        """)
+        with pytest.raises(ParseError, match="invalid type 'bogus'"):
+            parse_file(f)
+
+    def test_invalid_status_surfaces_model_error(self, tmp_path: Path):
+        f = _write(tmp_path, "r.yaml", """
+            schema_version: 1
+            redirects:
+              - from: /a
+                to: /b
+                type: exact
+                status: 200
+        """)
+        with pytest.raises(ParseError, match="http_status must be a 3xx"):
+            parse_file(f)
+
+    def test_error_message_includes_file_and_index(self, tmp_path: Path):
+        f = _write(tmp_path, "r.yaml", """
+            schema_version: 1
+            redirects:
+              - from: /a
+                to: /b
+                type: exact
+              - from: /c
+                to: /d
+                type: bogus
+        """)
+        with pytest.raises(ParseError, match=r"r\.yaml.*redirects\[1\]"):
+            parse_file(f)
+
+
+class TestExpansionRejection:
+    """Multi-source / multi-version / defaults must fail clearly until expand.py lands."""
+
+    def test_list_from_rejected(self, tmp_path: Path):
+        f = _write(tmp_path, "r.yaml", """
+            schema_version: 1
+            redirects:
+              - from:
+                  - /a
+                  - /b
+                to: /c
+                type: exact
+        """)
+        with pytest.raises(ParseError, match="requires expand.py"):
+            parse_file(f)
+
+    def test_list_to_rejected(self, tmp_path: Path):
+        f = _write(tmp_path, "r.yaml", """
+            schema_version: 1
+            redirects:
+              - from: /a
+                to:
+                  - /b
+                  - /c
+                type: exact
+        """)
+        with pytest.raises(ParseError, match="requires expand.py"):
+            parse_file(f)
+
+    def test_versions_key_rejected(self, tmp_path: Path):
+        f = _write(tmp_path, "r.yaml", """
+            schema_version: 1
+            redirects:
+              - from: /a
+                to: /b
+                type: exact
+                versions: [latest]
+        """)
+        with pytest.raises(ParseError, match="requires expand.py"):
+            parse_file(f)
+
+    def test_top_level_defaults_rejected(self, tmp_path: Path):
+        f = _write(tmp_path, "r.yaml", """
+            schema_version: 1
+            defaults:
+              versions: [latest]
+            redirects:
+              - from: /a
+                to: /b
+                type: exact
+        """)
+        with pytest.raises(ParseError, match="requires expand.py"):
+            parse_file(f)
+
+
+class TestMultiFile:
+    def test_files_concatenate_sorted(self, tmp_path: Path):
+        a = _write(tmp_path, "a.yaml", """
+            schema_version: 1
+            redirects:
+              - from: /a1
+                to: /b1
+                type: exact
+        """)
+        b = _write(tmp_path, "b.yaml", """
+            schema_version: 1
+            redirects:
+              - from: /a2
+                to: /b2
+                type: exact
+        """)
+        rs = parse_files([b, a])  # caller order shouldn't matter
+        assert {r.from_url for r in rs} == {"/a1", "/a2"}
+
+    def test_duplicate_identity_across_files_raises(self, tmp_path: Path):
+        a = _write(tmp_path, "a.yaml", """
+            schema_version: 1
+            redirects:
+              - from: /dup
+                to: /one
+                type: exact
+        """)
+        b = _write(tmp_path, "b.yaml", """
+            schema_version: 1
+            redirects:
+              - from: /dup
+                to: /two
+                type: exact
+        """)
+        with pytest.raises(ParseError, match="Duplicate identity"):
+            parse_files([a, b])
+
+    def test_same_from_different_type_across_files_ok(self, tmp_path: Path):
+        a = _write(tmp_path, "a.yaml", """
+            schema_version: 1
+            redirects:
+              - from: /a
+                to: /b
+                type: exact
+        """)
+        b = _write(tmp_path, "b.yaml", """
+            schema_version: 1
+            redirects:
+              - from: /a
+                to: /b
+                type: page
+        """)
+        rs = parse_files([a, b])
+        assert len(rs) == 2
