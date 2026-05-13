@@ -29,7 +29,7 @@ from rtd_redirects.model import REDIRECT_TYPES, Redirect, RedirectSet
 
 SCHEMA_VERSION = 1
 
-__all__ = ["ParseError", "SCHEMA_VERSION", "parse_file", "parse_files"]
+__all__ = ["ParseError", "SCHEMA_VERSION", "parse_file", "parse_files", "parse_text"]
 
 
 @dataclass(frozen=True)
@@ -59,41 +59,61 @@ def parse_file(path: Path) -> RedirectSet:
     return parse_files([path])
 
 
+def parse_text(text: str, *, source: str | Path = "<input>") -> RedirectSet:
+    """Parse YAML content from a string.
+
+    ``source`` is only used for error messages — useful when the YAML was
+    read from a git ref (``git show <ref>:<path>``) rather than disk so
+    errors still point at something the author can act on.
+    """
+    source_path = source if isinstance(source, Path) else Path(str(source))
+    rs = RedirectSet()
+    for r in _process_text(text, source_path):
+        try:
+            rs.add(r)
+        except ValueError as e:
+            raise ParseError(f"{source_path}: {e}") from e
+    return rs
+
+
 def _parse_file(path: Path) -> Iterable[Redirect]:
     try:
         text = path.read_text()
     except OSError as e:
         raise ParseError(f"{path}: cannot read: {e}") from e
+    return _process_text(text, path)
 
+
+def _process_text(text: str, source: Path) -> Iterable[Redirect]:
     try:
         doc = yaml.safe_load(text)
     except yaml.YAMLError as e:
-        raise ParseError(f"{path}: YAML parse error: {e}") from e
+        raise ParseError(f"{source}: YAML parse error: {e}") from e
 
     if doc is None:
         return []
 
     if not isinstance(doc, dict):
         raise ParseError(
-            f"{path}: top-level must be a mapping, got {type(doc).__name__}"
+            f"{source}: top-level must be a mapping, got {type(doc).__name__}"
         )
 
-    _validate_schema_version(path, doc)
-    language_prefix = _read_language_prefix(path, doc)
-    defaults_versions = _read_defaults_versions(path, doc)
+    _validate_schema_version(source, doc)
+    language_prefix = _read_language_prefix(source, doc)
+    defaults_versions = _read_defaults_versions(source, doc)
 
     redirects = doc.get("redirects")
     if redirects is None:
         return []
     if not isinstance(redirects, list):
         raise ParseError(
-            f"{path}: 'redirects' must be a list, got {type(redirects).__name__}"
+            f"{source}: 'redirects' must be a list, got {type(redirects).__name__}"
         )
 
     out: list[Redirect] = []
     for i, entry in enumerate(redirects):
         out.extend(_parse_entry(
-            _Ctx(file=path, index=i), entry, defaults_versions, language_prefix,
+            _Ctx(file=source, index=i), entry, defaults_versions, language_prefix,
         ))
     return out
 
