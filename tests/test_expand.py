@@ -215,7 +215,7 @@ class TestRequiredFields:
 
 class TestVersionResolution:
     def test_explicit_versions_with_fully_qualified_from_raises(self):
-        with pytest.raises(ParseError, match="cannot mix fully-qualified 'from'"):
+        with pytest.raises(ParseError, match="cannot mix fully-qualified or external"):
             _expand(
                 {
                     "from": "/en/latest/a.html",
@@ -226,7 +226,7 @@ class TestVersionResolution:
             )
 
     def test_mixed_qualified_and_path_only_raises(self):
-        with pytest.raises(ParseError, match="cannot mix fully-qualified and path-only"):
+        with pytest.raises(ParseError, match="cannot mix fully-qualified/external"):
             _expand(
                 {
                     "from": ["/en/latest/a.html", "/b.html"],
@@ -342,6 +342,132 @@ class TestLanguagePrefix:
                 None,
                 language_prefix="/en/",
             )
+
+
+class TestExternalUrls:
+    """External URLs (with a scheme or protocol-relative) bypass qualification."""
+
+    @pytest.mark.parametrize(
+        "external_to",
+        [
+            "https://docs.anyscale.com/platform",
+            "http://example.com/legacy",
+            "//cdn.example.com/assets/page",
+            "mailto:docs@anyscale.com",
+            "tel:+15551234567",
+        ],
+    )
+    def test_external_to_passes_through_with_versions(self, external_to: str):
+        records = _expand(
+            {
+                "from": "/old.html",
+                "to": external_to,
+                "type": "exact",
+                "versions": ["latest", "master"],
+            },
+        )
+        # The `from` fans out across versions; `to` stays exactly as written.
+        assert len(records) == 2
+        for r in records:
+            assert r.to_url == external_to
+        assert {r.from_url for r in records} == {
+            "/en/latest/old.html",
+            "/en/master/old.html",
+        }
+
+    def test_external_to_with_defaults(self):
+        records = _expand(
+            {"from": "/old.html", "to": "https://docs.anyscale.com/new", "type": "exact"},
+            defaults_versions=["latest"],
+        )
+        assert records[0].to_url == "https://docs.anyscale.com/new"
+        assert records[0].from_url == "/en/latest/old.html"
+
+    def test_external_from_passes_through(self):
+        """Unusual but supported: external ``from`` URL is left as-is."""
+        records = _expand(
+            {
+                "from": "https://elsewhere.example.com/legacy",
+                "to": "/en/latest/new.html",
+                "type": "exact",
+            },
+        )
+        assert records[0].from_url == "https://elsewhere.example.com/legacy"
+        assert records[0].to_url == "/en/latest/new.html"
+
+    def test_mixed_external_and_path_only_with_versions_raises(self):
+        with pytest.raises(ParseError, match="cannot mix fully-qualified or external"):
+            _expand(
+                {
+                    "from": ["https://x.com/a", "/b.html"],
+                    "to": "/c.html",
+                    "type": "exact",
+                    "versions": ["latest"],
+                },
+            )
+
+    def test_mixed_external_and_path_only_without_versions_raises(self):
+        with pytest.raises(ParseError, match="cannot mix fully-qualified/external"):
+            _expand(
+                {
+                    "from": ["https://x.com/a", "/b.html"],
+                    "to": "/c.html",
+                    "type": "exact",
+                },
+                defaults_versions=["latest"],
+            )
+
+
+class TestSlashHandling:
+    def test_deeply_nested_path_qualifies_correctly(self):
+        records = _expand(
+            {
+                "from": "/a/b/c/d/e.html",
+                "to": "/x/y/z.html",
+                "type": "exact",
+                "versions": ["latest"],
+            },
+        )
+        assert records[0].from_url == "/en/latest/a/b/c/d/e.html"
+        assert records[0].to_url == "/en/latest/x/y/z.html"
+
+    def test_trailing_slash_preserved(self):
+        records = _expand(
+            {
+                "from": "/api/foo/",
+                "to": "/api/bar/",
+                "type": "exact",
+                "versions": ["latest"],
+            },
+        )
+        assert records[0].from_url == "/en/latest/api/foo/"
+        assert records[0].to_url == "/en/latest/api/bar/"
+
+    def test_root_path(self):
+        records = _expand(
+            {"from": "/", "to": "/home.html", "type": "exact", "versions": ["latest"]},
+        )
+        assert records[0].from_url == "/en/latest/"
+        assert records[0].to_url == "/en/latest/home.html"
+
+    def test_path_without_leading_slash_gets_one(self):
+        records = _expand(
+            {"from": "foo.html", "to": "bar.html", "type": "exact", "versions": ["latest"]},
+        )
+        assert records[0].from_url == "/en/latest/foo.html"
+        assert records[0].to_url == "/en/latest/bar.html"
+
+    def test_nested_fully_qualified_detected_correctly(self):
+        """A fully-qualified URL with many trailing segments stays unmodified."""
+        records = _expand(
+            {
+                "from": "/en/v2.55/api/v3/something.html",
+                "to": "/en/v2.55/api/v3/other.html",
+                "type": "exact",
+            },
+        )
+        assert records[0].from_url == "/en/v2.55/api/v3/something.html"
+        assert records[0].to_url == "/en/v2.55/api/v3/other.html"
 
 
 class TestErrorContext:

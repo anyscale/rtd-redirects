@@ -39,6 +39,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from rtd_redirects.exceptions import ParseError
 from rtd_redirects.model import REDIRECT_TYPES, Redirect
@@ -185,8 +186,9 @@ def _resolve_versions(
         if any_qualified:
             raise _err(
                 file, index,
-                f"cannot mix fully-qualified 'from' (starts with "
-                f"{language_prefix}/<version>/) with explicit 'versions:'",
+                "cannot mix fully-qualified or external 'from' URLs (a URL "
+                f"under {language_prefix}/<version>/, or one with a scheme "
+                "such as https://) with explicit 'versions:'",
             )
         return list(_validate_plain_versions(file, index, explicit))
 
@@ -196,8 +198,8 @@ def _resolve_versions(
     if any_qualified and any_path_only:
         raise _err(
             file, index,
-            "cannot mix fully-qualified and path-only 'from' values without "
-            "explicit 'versions:'",
+            "cannot mix fully-qualified/external and path-only 'from' values "
+            "without explicit 'versions:'",
         )
 
     if defaults_versions is None:
@@ -223,8 +225,27 @@ def _validate_plain_versions(file: Path, index: int, versions: list[Any]) -> lis
     return out
 
 
+def _is_external(url: str) -> bool:
+    """True when ``url`` has a URL scheme or is protocol-relative.
+
+    Covers absolute URLs (``https://docs.anyscale.com/x``), schemes without
+    a host (``mailto:foo@example.com``, ``tel:+1234567890``), and
+    protocol-relative URLs (``//cdn.example.com/x``). These targets are
+    absolute and must not receive the project's language-prefix qualification.
+    """
+    parsed = urlparse(url)
+    return bool(parsed.scheme or parsed.netloc)
+
+
 def _is_path_only(url: str, language_prefix: str) -> bool:
-    """True when ``url`` doesn't start with ``<language_prefix>/<version>/``."""
+    """True when ``url`` is an intra-project path that wants qualification.
+
+    Returns ``False`` for both fully-qualified intra-project URLs (those
+    starting with ``<language_prefix>/<version>/``) and URLs that are external
+    to the project (``_is_external``).
+    """
+    if _is_external(url):
+        return False
     pattern = rf"^{re.escape(language_prefix)}/[^/]+/"
     return not re.match(pattern, url)
 
@@ -232,8 +253,8 @@ def _is_path_only(url: str, language_prefix: str) -> bool:
 def _qualify(url: str, version: str | None, language_prefix: str) -> str:
     """Prefix a path-only ``url`` with ``<language_prefix>/<version>``.
 
-    Returns the URL unchanged when it's already fully-qualified or when no
-    version was provided.
+    Returns the URL unchanged when it's already fully-qualified, external, or
+    when no version was provided.
     """
     if version is None or not _is_path_only(url, language_prefix):
         return url
