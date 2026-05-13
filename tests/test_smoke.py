@@ -17,16 +17,23 @@ def test_cli_main_is_callable():
 
 
 @pytest.mark.parametrize(
-    "command",
-    ["list", "dump", "plan", "diff-file", "apply", "audit"],
+    "argv",
+    [
+        ["list"],
+        ["dump"],
+        ["plan", "--file", "redirects.yaml"],
+        ["diff-file", "--file", "redirects.yaml"],
+        ["apply", "--file", "redirects.yaml"],
+        ["audit", "--file", "redirects.yaml"],
+    ],
 )
-def test_cli_registers_subcommand(command: str):
+def test_cli_registers_subcommand(argv: list[str]):
     parser = _build_parser()
-    args = parser.parse_args([command])
-    assert args.command == command
+    args = parser.parse_args(argv)
+    assert args.command == argv[0]
 
 
-def test_cli_requires_subcommand(capsys):
+def test_cli_requires_subcommand():
     parser = _build_parser()
     with pytest.raises(SystemExit):
         parser.parse_args([])
