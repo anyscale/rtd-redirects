@@ -39,7 +39,13 @@ def _mock_response(
 
 @pytest.fixture
 def mock_session() -> MagicMock:
-    return MagicMock(spec=requests.Session)
+    session = MagicMock(spec=requests.Session)
+    # Session.headers is set in __init__ on the real class, so it's not on the
+    # class spec. Pre-populate with a real dict so RtdClient's
+    # ``self._session.headers.update(...)`` works and tests can inspect the
+    # final header set without going through Mock attribute machinery.
+    session.headers = {}
+    return session
 
 
 @pytest.fixture
