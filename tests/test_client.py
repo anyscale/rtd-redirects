@@ -281,7 +281,9 @@ class TestRetryAndErrors:
             c.list_redirects()
         assert mock_session.request.call_count == 3
 
-    def test_missing_retry_after_falls_back_to_60s(self, client: RtdClient, mock_session: MagicMock):
+    def test_missing_retry_after_falls_back_to_60s(
+        self, client: RtdClient, mock_session: MagicMock
+    ):
         mock_session.request.side_effect = [
             _mock_response(429, headers={}),
             _mock_response(200, {"results": [], "next": None}),
