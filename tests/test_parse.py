@@ -213,6 +213,31 @@ class TestEntryValidation:
         with pytest.raises(ParseError, match="'from' must be a string"):
             parse_file(f)
 
+    def test_external_from_rejected(self, tmp_path: Path):
+        f = _write(tmp_path, "r.yaml", """
+            schema_version: 1
+            redirects:
+              - from: https://elsewhere.example.com/x
+                to:   /new.html
+                type: exact
+        """)
+        with pytest.raises(ParseError, match="'from' must be a project path"):
+            parse_file(f)
+
+    def test_external_to_accepted_in_canonical(self, tmp_path: Path):
+        """``to:`` with a scheme is a valid cross-host redirect target."""
+        f = _write(tmp_path, "r.yaml", """
+            schema_version: 1
+            redirects:
+              - from: /en/latest/old.html
+                to:   https://docs.anyscale.com/new
+                type: exact
+        """)
+        rs = parse_file(f)
+        r = next(iter(rs))
+        assert r.from_url == "/en/latest/old.html"
+        assert r.to_url == "https://docs.anyscale.com/new"
+
     def test_invalid_type_value(self, tmp_path: Path):
         f = _write(tmp_path, "r.yaml", """
             schema_version: 1

@@ -215,7 +215,7 @@ class TestRequiredFields:
 
 class TestVersionResolution:
     def test_explicit_versions_with_fully_qualified_from_raises(self):
-        with pytest.raises(ParseError, match="cannot mix fully-qualified or external"):
+        with pytest.raises(ParseError, match="cannot mix fully-qualified 'from'"):
             _expand(
                 {
                     "from": "/en/latest/a.html",
@@ -226,7 +226,7 @@ class TestVersionResolution:
             )
 
     def test_mixed_qualified_and_path_only_raises(self):
-        with pytest.raises(ParseError, match="cannot mix fully-qualified/external"):
+        with pytest.raises(ParseError, match="cannot mix fully-qualified and path-only"):
             _expand(
                 {
                     "from": ["/en/latest/a.html", "/b.html"],
@@ -383,20 +383,29 @@ class TestExternalUrls:
         assert records[0].to_url == "https://docs.anyscale.com/new"
         assert records[0].from_url == "/en/latest/old.html"
 
-    def test_external_from_passes_through(self):
-        """Unusual but supported: external ``from`` URL is left as-is."""
-        records = _expand(
-            {
-                "from": "https://elsewhere.example.com/legacy",
-                "to": "/en/latest/new.html",
-                "type": "exact",
-            },
-        )
-        assert records[0].from_url == "https://elsewhere.example.com/legacy"
-        assert records[0].to_url == "/en/latest/new.html"
+    @pytest.mark.parametrize(
+        "external_from",
+        [
+            "https://elsewhere.example.com/legacy",
+            "http://example.com/foo",
+            "//cdn.example.com/foo",
+            "mailto:foo@example.com",
+        ],
+    )
+    def test_external_from_rejected(self, external_from: str):
+        """RtD only redirects from paths the project serves, never external URLs."""
+        with pytest.raises(ParseError, match="'from' must be a project path"):
+            _expand(
+                {
+                    "from": external_from,
+                    "to": "/new.html",
+                    "type": "exact",
+                    "versions": ["latest"],
+                },
+            )
 
-    def test_mixed_external_and_path_only_with_versions_raises(self):
-        with pytest.raises(ParseError, match="cannot mix fully-qualified or external"):
+    def test_external_in_from_list_rejected(self):
+        with pytest.raises(ParseError, match="'from' must be a project path"):
             _expand(
                 {
                     "from": ["https://x.com/a", "/b.html"],
@@ -404,17 +413,6 @@ class TestExternalUrls:
                     "type": "exact",
                     "versions": ["latest"],
                 },
-            )
-
-    def test_mixed_external_and_path_only_without_versions_raises(self):
-        with pytest.raises(ParseError, match="cannot mix fully-qualified/external"):
-            _expand(
-                {
-                    "from": ["https://x.com/a", "/b.html"],
-                    "to": "/c.html",
-                    "type": "exact",
-                },
-                defaults_versions=["latest"],
             )
 
 

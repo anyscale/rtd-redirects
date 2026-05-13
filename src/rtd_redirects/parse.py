@@ -24,7 +24,7 @@ from typing import Any
 import yaml
 
 from rtd_redirects.exceptions import ParseError
-from rtd_redirects.expand import DEFAULT_LANGUAGE_PREFIX, expand_entry
+from rtd_redirects.expand import DEFAULT_LANGUAGE_PREFIX, expand_entry, is_external
 from rtd_redirects.model import REDIRECT_TYPES, Redirect, RedirectSet
 
 SCHEMA_VERSION = 1
@@ -188,6 +188,13 @@ def _parse_canonical(ctx: _Ctx, entry: dict[str, Any]) -> Redirect:
     _require_str(ctx, entry, "from")
     _require_str(ctx, entry, "to")
     _require_str(ctx, entry, "type")
+
+    if is_external(entry["from"]):
+        raise ParseError(
+            f"{ctx.file}: redirects[{ctx.index}]: 'from' must be a project path, "
+            f"not an external URL ({entry['from']!r}); RtD only redirects from "
+            "paths the project serves"
+        )
 
     type_ = entry["type"]
     if type_ not in REDIRECT_TYPES:

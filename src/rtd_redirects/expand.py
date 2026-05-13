@@ -116,8 +116,8 @@ def _read_from(file: Path, index: int, entry: dict[str, Any]) -> list[str]:
     if value is None:
         raise _err(file, index, "missing required field 'from'")
     if isinstance(value, str):
-        return [value]
-    if isinstance(value, list):
+        result = [value]
+    elif isinstance(value, list):
         if not value:
             raise _err(file, index, "'from' list cannot be empty")
         for item in value:
@@ -126,11 +126,20 @@ def _read_from(file: Path, index: int, entry: dict[str, Any]) -> list[str]:
                     file, index,
                     f"'from' list items must be strings, got {type(item).__name__}",
                 )
-        return list(value)
-    raise _err(
-        file, index,
-        f"'from' must be a string or list of strings, got {type(value).__name__}",
-    )
+        result = list(value)
+    else:
+        raise _err(
+            file, index,
+            f"'from' must be a string or list of strings, got {type(value).__name__}",
+        )
+    for url in result:
+        if is_external(url):
+            raise _err(
+                file, index,
+                f"'from' must be a project path, not an external URL ({url!r}); "
+                "RtD only redirects from paths the project serves",
+            )
+    return result
 
 
 def _read_to(file: Path, index: int, entry: dict[str, Any]) -> str:
@@ -186,9 +195,8 @@ def _resolve_versions(
         if any_qualified:
             raise _err(
                 file, index,
-                "cannot mix fully-qualified or external 'from' URLs (a URL "
-                f"under {language_prefix}/<version>/, or one with a scheme "
-                "such as https://) with explicit 'versions:'",
+                f"cannot mix fully-qualified 'from' (starts with "
+                f"{language_prefix}/<version>/) with explicit 'versions:'",
             )
         return list(_validate_plain_versions(file, index, explicit))
 
@@ -198,8 +206,8 @@ def _resolve_versions(
     if any_qualified and any_path_only:
         raise _err(
             file, index,
-            "cannot mix fully-qualified/external and path-only 'from' values "
-            "without explicit 'versions:'",
+            "cannot mix fully-qualified and path-only 'from' values without "
+            "explicit 'versions:'",
         )
 
     if defaults_versions is None:
@@ -225,7 +233,7 @@ def _validate_plain_versions(file: Path, index: int, versions: list[Any]) -> lis
     return out
 
 
-def _is_external(url: str) -> bool:
+def is_external(url: str) -> bool:
     """True when ``url`` has a URL scheme or is protocol-relative.
 
     Covers absolute URLs (``https://docs.anyscale.com/x``), schemes without
@@ -242,9 +250,9 @@ def _is_path_only(url: str, language_prefix: str) -> bool:
 
     Returns ``False`` for both fully-qualified intra-project URLs (those
     starting with ``<language_prefix>/<version>/``) and URLs that are external
-    to the project (``_is_external``).
+    to the project (``is_external``).
     """
-    if _is_external(url):
+    if is_external(url):
         return False
     pattern = rf"^{re.escape(language_prefix)}/[^/]+/"
     return not re.match(pattern, url)
