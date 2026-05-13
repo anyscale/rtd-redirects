@@ -1,13 +1,81 @@
 """rtd-redirects CLI entry point.
 
-Subcommands are stubbed out here so the surface is reviewable before
-each module lands. Implementations arrive in subsequent PRs.
+Wires the six MVP subcommands end-to-end against the underlying modules:
+
+- ``list``: ``RtdClient.list_redirects``
+- ``dump``: ``RtdClient.list_redirects`` + ``collapse`` + YAML serialization
+- ``plan``: ``parse_file`` + ``RtdClient.list_redirects`` + ``diff`` (no mutation)
+- ``diff-file``: ``diff_file`` (git-only, no API)
+- ``apply``: ``parse_file`` + ``RtdClient.list_redirects`` + ``diff`` + ``apply``
+- ``audit``: same as ``plan`` but exits non-zero when drift is detected
+
+The ``client_factory`` keyword on ``main()`` exists so tests can inject a
+mock client without monkeypatching the ``RtdClient`` import. Production code
+uses the default, which constructs a real ``RtdClient`` from
+``RTD_API_TOKEN``.
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import sys
+from collections.abc import Callable
+from pathlib import Path
+from typing import TextIO
+
+import yaml
+
+from rtd_redirects.apply import apply as apply_diff
+from rtd_redirects.client import RtdAuthError, RtdClient, RtdClientError
+from rtd_redirects.collapse import collapse
+from rtd_redirects.diff import Diff, diff
+from rtd_redirects.diff_file import GitError, diff_file
+from rtd_redirects.exceptions import ParseError
+from rtd_redirects.model import RedirectSet
+from rtd_redirects.parse import SCHEMA_VERSION, parse_file
+
+ClientFactory = Callable[[str], RtdClient]
+
+EXIT_OK = 0
+EXIT_DRIFT = 1
+EXIT_USAGE = 2
+EXIT_RTD = 3
+EXIT_GIT = 4
+EXIT_PARSE = 5
+
+
+def main(
+    argv: list[str] | None = None,
+    *,
+    client_factory: ClientFactory = RtdClient,
+) -> int:
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+
+    handlers = {
+        "list": _cmd_list,
+        "dump": _cmd_dump,
+        "plan": _cmd_plan,
+        "diff-file": _cmd_diff_file,
+        "apply": _cmd_apply,
+        "audit": _cmd_audit,
+    }
+
+    try:
+        return handlers[args.command](args, client_factory=client_factory)
+    except ParseError as e:
+        print(f"error: parse: {e}", file=sys.stderr)
+        return EXIT_PARSE
+    except (RtdAuthError, RtdClientError) as e:
+        print(f"error: rtd: {e}", file=sys.stderr)
+        return EXIT_RTD
+    except GitError as e:
+        print(f"error: git: {e}", file=sys.stderr)
+        return EXIT_GIT
+    except FileNotFoundError as e:
+        print(f"error: file not found: {e.filename}", file=sys.stderr)
+        return EXIT_PARSE
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -17,43 +85,199 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    subparsers.add_parser(
-        "list",
-        help="List redirects currently configured on the RtD project.",
+    project_help = (
+        "RtD project slug. Defaults to the RTD_PROJECT_SLUG env var."
     )
-    subparsers.add_parser(
-        "dump",
-        help="Export the RtD project's current redirects to a YAML file.",
+    file_help = "Path to the YAML redirect source file."
+
+    p_list = subparsers.add_parser(
+        "list", help="List redirects currently configured on the RtD project.",
     )
-    subparsers.add_parser(
-        "plan",
-        help="Show the diff between a YAML file and the RtD project, without applying.",
+    p_list.add_argument("--project", "-p", default=None, help=project_help)
+
+    p_dump = subparsers.add_parser(
+        "dump", help="Export the RtD project's redirects to a YAML file.",
     )
-    subparsers.add_parser(
-        "diff-file",
-        help="Show the redirect-level diff between two git refs of a YAML file.",
+    p_dump.add_argument("--project", "-p", default=None, help=project_help)
+    p_dump.add_argument(
+        "--output", "-o", default=None,
+        help="Output file path. Writes to stdout when omitted.",
     )
-    subparsers.add_parser(
-        "apply",
-        help="Apply a YAML file to the RtD project.",
+
+    p_plan = subparsers.add_parser(
+        "plan", help="Show the diff between a YAML file and the RtD project.",
     )
-    subparsers.add_parser(
-        "audit",
-        help="Report drift between a YAML file and the RtD project.",
+    p_plan.add_argument("--project", "-p", default=None, help=project_help)
+    p_plan.add_argument("--file", "-f", required=True, help=file_help)
+
+    p_diff = subparsers.add_parser(
+        "diff-file", help="Show the diff between two git refs of a YAML file.",
     )
+    p_diff.add_argument(
+        "--base", default="origin/master",
+        help="Base git ref (default: origin/master).",
+    )
+    p_diff.add_argument(
+        "--head", default="HEAD",
+        help="Head git ref (default: HEAD).",
+    )
+    p_diff.add_argument("--file", "-f", required=True, help=file_help)
+    p_diff.add_argument(
+        "--repo", default=None,
+        help="Path to the repository (default: current working directory).",
+    )
+
+    p_apply = subparsers.add_parser(
+        "apply", help="Apply a YAML file to the RtD project.",
+    )
+    p_apply.add_argument("--project", "-p", default=None, help=project_help)
+    p_apply.add_argument("--file", "-f", required=True, help=file_help)
+    p_apply.add_argument(
+        "--yes", "-y", action="store_true",
+        help="Skip interactive confirmation. Required in non-interactive contexts.",
+    )
+
+    p_audit = subparsers.add_parser(
+        "audit", help="Report drift between a YAML file and the RtD project.",
+    )
+    p_audit.add_argument("--project", "-p", default=None, help=project_help)
+    p_audit.add_argument("--file", "-f", required=True, help=file_help)
 
     return parser
 
 
-def main(argv: list[str] | None = None) -> int:
-    """Run the rtd-redirects CLI."""
-    parser = _build_parser()
-    args = parser.parse_args(argv)
+def _resolve_project(args: argparse.Namespace) -> str:
+    if args.project:
+        return args.project
+    env = os.environ.get("RTD_PROJECT_SLUG")
+    if env:
+        return env
+    raise SystemExit(
+        "error: --project required (or set RTD_PROJECT_SLUG)",
+    )
+
+
+def _cmd_list(args: argparse.Namespace, *, client_factory: ClientFactory) -> int:
+    client = client_factory(_resolve_project(args))
+    for r in client.list_redirects():
+        print(f"{r.from_url} -> {r.to_url} ({r.type}) pk={r.pk}")
+    return EXIT_OK
+
+
+def _cmd_dump(args: argparse.Namespace, *, client_factory: ClientFactory) -> int:
+    client = client_factory(_resolve_project(args))
+    entries = collapse(client.list_redirects())
+    doc = {"schema_version": SCHEMA_VERSION, "redirects": entries}
+    yaml_text = yaml.safe_dump(doc, sort_keys=False, default_flow_style=False)
+    if args.output:
+        Path(args.output).write_text(yaml_text)
+        print(f"wrote {len(entries)} entries to {args.output}", file=sys.stderr)
+    else:
+        sys.stdout.write(yaml_text)
+    return EXIT_OK
+
+
+def _cmd_plan(args: argparse.Namespace, *, client_factory: ClientFactory) -> int:
+    source = parse_file(Path(args.file))
+    client = client_factory(_resolve_project(args))
+    target = RedirectSet(client.list_redirects())
+    d = diff(source, target)
+    _print_diff(d)
+    if d.is_empty:
+        print("plan: no changes", file=sys.stderr)
+    return EXIT_OK
+
+
+def _cmd_diff_file(args: argparse.Namespace, *, client_factory: ClientFactory) -> int:
+    d = diff_file(
+        args.file,
+        base_ref=args.base,
+        head_ref=args.head,
+        repo_path=args.repo,
+    )
+    _print_diff(d)
+    return EXIT_OK
+
+
+def _cmd_apply(args: argparse.Namespace, *, client_factory: ClientFactory) -> int:
+    source = parse_file(Path(args.file))
+    client = client_factory(_resolve_project(args))
+    target = RedirectSet(client.list_redirects())
+    d = diff(source, target)
+
+    if d.is_empty:
+        print("apply: no changes", file=sys.stderr)
+        return EXIT_OK
+
+    _print_diff(d, file=sys.stderr)
+
+    if not args.yes:
+        try:
+            response = input("Apply these changes? [y/N] ").strip().lower()
+        except EOFError:
+            print("error: not a tty; pass --yes to apply non-interactively", file=sys.stderr)
+            return EXIT_USAGE
+        if response not in ("y", "yes"):
+            print("aborted", file=sys.stderr)
+            return EXIT_USAGE
+
+    result = apply_diff(d, client)
     print(
-        f"rtd-redirects {args.command}: not yet implemented",
+        f"applied: {result.deleted} deleted, {result.added} added, "
+        f"{result.updated} updated, {result.reordered} reordered",
         file=sys.stderr,
     )
-    return 1
+    return EXIT_OK
+
+
+def _cmd_audit(args: argparse.Namespace, *, client_factory: ClientFactory) -> int:
+    source = parse_file(Path(args.file))
+    client = client_factory(_resolve_project(args))
+    target = RedirectSet(client.list_redirects())
+    d = diff(source, target)
+
+    if d.is_empty:
+        print("audit: no drift", file=sys.stderr)
+        return EXIT_OK
+
+    print("audit: drift detected", file=sys.stderr)
+    _print_diff(d, file=sys.stderr)
+    return EXIT_DRIFT
+
+
+def _print_diff(d: Diff, *, file: TextIO | None = None) -> None:
+    """Render a Diff as a human-readable summary.
+
+    ``+`` adds, ``-`` deletes, ``~`` updates, ``@`` reorders. Footer line
+    summarizes counts so a quick scan tells you the shape of the change.
+    Late-binds ``file`` to ``sys.stdout`` so pytest's ``capsys`` (which
+    replaces ``sys.stdout`` at fixture-setup time) captures the output.
+    """
+    if file is None:
+        file = sys.stdout
+    for r in d.adds:
+        print(f"+ {r.from_url} -> {r.to_url} ({r.type})", file=file)
+    for r in d.deletes:
+        print(f"- {r.from_url} -> {r.to_url} ({r.type}) pk={r.pk}", file=file)
+    for u in d.updates:
+        print(
+            f"~ {u.source.from_url} -> {u.source.to_url} ({u.source.type}) "
+            f"pk={u.target.pk}",
+            file=file,
+        )
+    for u in d.reorders:
+        print(
+            f"@ {u.source.from_url} ({u.source.type}) "
+            f"position {u.target.position} -> {u.source.position} pk={u.target.pk}",
+            file=file,
+        )
+    if not d.is_empty:
+        print(file=file)
+    print(
+        f"{len(d.adds)} add, {len(d.updates)} update, "
+        f"{len(d.deletes)} delete, {len(d.reorders)} reorder",
+        file=file,
+    )
 
 
 if __name__ == "__main__":
