@@ -1,0 +1,64 @@
+[build-system]
+requires = ["setuptools>=64", "setuptools-scm>=8"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rtd-redirects"
+description = "Manage Read the Docs redirects as code via a YAML source of truth reconciled against the RtD v3 API."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [
+    { name = "Anyscale, Inc.", email = "docs@anyscale.com" },
+]
+keywords = ["readthedocs", "redirects", "documentation", "sphinx"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Documentation",
+    "Topic :: Software Development :: Documentation",
+]
+dynamic = ["version"]
+dependencies = [
+    "requests>=2.31",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "flask>=3.0",
+    "ruff>=0.5",
+]
+
+[project.scripts]
+rtd-redirects = "rtd_redirects.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/anyscale/rtd-redirects"
+Issues = "https://github.com/anyscale/rtd-redirects/issues"
+Source = "https://github.com/anyscale/rtd-redirects"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools_scm]
+version_file = "src/rtd_redirects/_version.py"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--cov=rtd_redirects --cov-report=term-missing"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
