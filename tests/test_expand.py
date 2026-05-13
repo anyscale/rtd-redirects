@@ -9,7 +9,6 @@ import pytest
 from rtd_redirects.exceptions import ParseError
 from rtd_redirects.expand import expand_entry
 
-
 FILE = Path("test.yaml")
 INDEX = 0
 
