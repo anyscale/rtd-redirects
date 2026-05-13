@@ -7,6 +7,10 @@ position in the ``redirects:`` list so authors see exactly where to fix.
 Expansion-shaped entries (list-valued ``from:``, per-entry ``versions:``, and
 path-only ``from:`` paired with top-level ``defaults.versions``) are routed to
 ``expand.py``. Canonical 1:1 entries take the short path here.
+
+The URL language segment (``/en`` for ``docs.ray.io/en/latest/...``) is
+configurable per file via top-level ``language_prefix:``, defaulting to
+``/en``.
 """
 
 from __future__ import annotations
@@ -20,12 +24,10 @@ from typing import Any
 import yaml
 
 from rtd_redirects.exceptions import ParseError
-from rtd_redirects.expand import expand_entry
+from rtd_redirects.expand import DEFAULT_LANGUAGE_PREFIX, expand_entry
 from rtd_redirects.model import REDIRECT_TYPES, Redirect, RedirectSet
 
 SCHEMA_VERSION = 1
-
-_VERSION_PREFIX = re.compile(r"^/en/([^/]+)/")
 
 __all__ = ["ParseError", "SCHEMA_VERSION", "parse_file", "parse_files"]
 
@@ -77,6 +79,7 @@ def _parse_file(path: Path) -> Iterable[Redirect]:
         )
 
     _validate_schema_version(path, doc)
+    language_prefix = _read_language_prefix(path, doc)
     defaults_versions = _read_defaults_versions(path, doc)
 
     redirects = doc.get("redirects")
@@ -89,7 +92,9 @@ def _parse_file(path: Path) -> Iterable[Redirect]:
 
     out: list[Redirect] = []
     for i, entry in enumerate(redirects):
-        out.extend(_parse_entry(_Ctx(file=path, index=i), entry, defaults_versions))
+        out.extend(_parse_entry(
+            _Ctx(file=path, index=i), entry, defaults_versions, language_prefix,
+        ))
     return out
 
 
@@ -102,6 +107,18 @@ def _validate_schema_version(path: Path, doc: dict[str, Any]) -> None:
             f"{path}: unsupported schema_version {version!r}; "
             f"this version of rtd-redirects supports {SCHEMA_VERSION}"
         )
+
+
+def _read_language_prefix(path: Path, doc: dict[str, Any]) -> str:
+    """Return top-level ``language_prefix:`` or the default ``/en``."""
+    value = doc.get("language_prefix")
+    if value is None:
+        return DEFAULT_LANGUAGE_PREFIX
+    if not isinstance(value, str):
+        raise ParseError(
+            f"{path}: 'language_prefix' must be a string, got {type(value).__name__}"
+        )
+    return value
 
 
 def _read_defaults_versions(path: Path, doc: dict[str, Any]) -> list[str] | None:
@@ -128,6 +145,7 @@ def _parse_entry(
     ctx: _Ctx,
     entry: Any,
     defaults_versions: list[str] | None,
+    language_prefix: str,
 ) -> Iterable[Redirect]:
     if not isinstance(entry, dict):
         raise ParseError(
@@ -135,12 +153,22 @@ def _parse_entry(
             f"got {type(entry).__name__}"
         )
 
-    if _needs_expansion(entry, defaults_versions):
-        return expand_entry(ctx.file, ctx.index, entry, defaults_versions)
+    if _needs_expansion(entry, defaults_versions, language_prefix):
+        try:
+            return expand_entry(
+                ctx.file, ctx.index, entry, defaults_versions,
+                language_prefix=language_prefix,
+            )
+        except ValueError as e:
+            raise ParseError(f"{ctx.file}: {e}") from e
     return [_parse_canonical(ctx, entry)]
 
 
-def _needs_expansion(entry: dict[str, Any], defaults_versions: list[str] | None) -> bool:
+def _needs_expansion(
+    entry: dict[str, Any],
+    defaults_versions: list[str] | None,
+    language_prefix: str,
+) -> bool:
     """True when an entry must be routed through ``expand_entry``."""
     if isinstance(entry.get("from"), list) or isinstance(entry.get("to"), list):
         return True
@@ -150,7 +178,7 @@ def _needs_expansion(entry: dict[str, Any], defaults_versions: list[str] | None)
     if (
         defaults_versions is not None
         and isinstance(from_value, str)
-        and not _VERSION_PREFIX.match(from_value)
+        and not re.match(rf"^{re.escape(language_prefix)}/[^/]+/", from_value)
     ):
         return True
     return False

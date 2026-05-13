@@ -20,6 +20,18 @@ Resolution rules (design.md §"Global defaults via defaults.versions"):
    truth conflict; ``ParseError``.
 5. Path-only ``from:`` with no ``versions:`` and no ``defaults.versions:``
    -> ``ParseError`` (no way to know which versions to target).
+
+Language prefix
+---------------
+
+RtD URLs are typically shaped ``<language_prefix>/<version>/<path>`` (for
+example ``/en/latest/data/inference.html``). The prefix is configurable
+per call so a docs project that disables the per-language URL segment in
+RtD can pass ``language_prefix="/<lang>"`` of its choice. A future
+languageless setup (``/<version>/<path>`` with no language segment at all)
+requires enumerating the live version list to distinguish "fully-qualified"
+from "path-only" URLs and is rejected here with a clear error; that mode
+will land alongside RtD's version-list integration.
 """
 
 from __future__ import annotations
@@ -31,7 +43,8 @@ from typing import Any
 from rtd_redirects.exceptions import ParseError
 from rtd_redirects.model import REDIRECT_TYPES, Redirect
 
-_VERSION_PREFIX = re.compile(r"^/en/([^/]+)/")
+DEFAULT_LANGUAGE_PREFIX = "/en"
+"""Default RtD-style language URL segment. Override per call via ``language_prefix=``."""
 
 _PATTERN_NOT_YET_SUPPORTED = (
     "version pattern identifiers (globs, semver ranges, exclusions, macros) "
@@ -44,25 +57,34 @@ def expand_entry(
     index: int,
     entry: dict[str, Any],
     defaults_versions: list[str] | None,
+    *,
+    language_prefix: str = DEFAULT_LANGUAGE_PREFIX,
 ) -> list[Redirect]:
     """Expand one multi-source / multi-version entry into canonical Redirects.
 
     ``file`` and ``index`` are used for error-message context only.
     ``defaults_versions`` is the parsed value of top-level ``defaults.versions``
     or ``None`` if the file didn't set one.
+    ``language_prefix`` is the URL segment that sits between the host and the
+    version segment (e.g. ``/en`` for ``docs.ray.io/en/latest/...``). Must be
+    non-empty and start with ``/``; languageless RtD setups are not yet
+    supported.
     """
+    _validate_language_prefix(language_prefix)
     from_list = _read_from(file, index, entry)
     to_value = _read_to(file, index, entry)
     type_value = _read_type(file, index, entry)
-    versions = _resolve_versions(file, index, entry, from_list, defaults_versions)
+    versions = _resolve_versions(
+        file, index, entry, from_list, defaults_versions, language_prefix,
+    )
 
     records: list[Redirect] = []
     for version in versions:
         for from_url in from_list:
             try:
                 records.append(Redirect(
-                    from_url=_qualify(from_url, version),
-                    to_url=_qualify(to_value, version),
+                    from_url=_qualify(from_url, version, language_prefix),
+                    to_url=_qualify(to_value, version, language_prefix),
                     type=type_value,
                     http_status=entry.get("status", 301),
                     force=entry.get("force", False),
@@ -73,6 +95,19 @@ def expand_entry(
             except (TypeError, ValueError) as e:
                 raise _err(file, index, str(e)) from e
     return records
+
+
+def _validate_language_prefix(prefix: str) -> None:
+    if not prefix:
+        raise ValueError(
+            "language_prefix='' (languageless RtD) requires version-list "
+            "enumeration to distinguish path-only from fully-qualified URLs "
+            "and is not yet supported"
+        )
+    if not prefix.startswith("/"):
+        raise ValueError(f"language_prefix must start with '/', got {prefix!r}")
+    if prefix.endswith("/"):
+        raise ValueError(f"language_prefix must not end with '/', got {prefix!r}")
 
 
 def _read_from(file: Path, index: int, entry: dict[str, Any]) -> list[str]:
@@ -126,6 +161,7 @@ def _resolve_versions(
     entry: dict[str, Any],
     from_list: list[str],
     defaults_versions: list[str] | None,
+    language_prefix: str,
 ) -> list[str | None]:
     """Decide which version segments to expand across.
 
@@ -134,9 +170,9 @@ def _resolve_versions(
     qualification in ``_qualify``).
     """
     explicit = entry.get("versions")
-    all_qualified = all(not _is_path_only(f) for f in from_list)
-    any_qualified = any(not _is_path_only(f) for f in from_list)
-    any_path_only = any(_is_path_only(f) for f in from_list)
+    all_qualified = all(not _is_path_only(f, language_prefix) for f in from_list)
+    any_qualified = any(not _is_path_only(f, language_prefix) for f in from_list)
+    any_path_only = any(_is_path_only(f, language_prefix) for f in from_list)
 
     if explicit is not None:
         if not isinstance(explicit, list):
@@ -149,8 +185,8 @@ def _resolve_versions(
         if any_qualified:
             raise _err(
                 file, index,
-                "cannot mix fully-qualified 'from' (starts with /en/<version>/) "
-                "with explicit 'versions:'",
+                f"cannot mix fully-qualified 'from' (starts with "
+                f"{language_prefix}/<version>/) with explicit 'versions:'",
             )
         return list(_validate_plain_versions(file, index, explicit))
 
@@ -187,22 +223,23 @@ def _validate_plain_versions(file: Path, index: int, versions: list[Any]) -> lis
     return out
 
 
-def _is_path_only(url: str) -> bool:
-    """True when ``url`` doesn't start with ``/en/<version>/``."""
-    return not _VERSION_PREFIX.match(url)
+def _is_path_only(url: str, language_prefix: str) -> bool:
+    """True when ``url`` doesn't start with ``<language_prefix>/<version>/``."""
+    pattern = rf"^{re.escape(language_prefix)}/[^/]+/"
+    return not re.match(pattern, url)
 
 
-def _qualify(url: str, version: str | None) -> str:
-    """Prefix a path-only ``url`` with ``/en/<version>``.
+def _qualify(url: str, version: str | None, language_prefix: str) -> str:
+    """Prefix a path-only ``url`` with ``<language_prefix>/<version>``.
 
     Returns the URL unchanged when it's already fully-qualified or when no
     version was provided.
     """
-    if version is None or not _is_path_only(url):
+    if version is None or not _is_path_only(url, language_prefix):
         return url
     if not url.startswith("/"):
         url = "/" + url
-    return f"/en/{version}{url}"
+    return f"{language_prefix}/{version}{url}"
 
 
 def _is_pattern(v: str) -> bool:

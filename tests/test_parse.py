@@ -333,6 +333,31 @@ class TestExpansionIntegration:
         with pytest.raises(ParseError, match="'defaults.versions' must be a list"):
             parse_file(f)
 
+    def test_custom_language_prefix(self, tmp_path: Path):
+        f = _write(tmp_path, "r.yaml", """
+            schema_version: 1
+            language_prefix: /de
+            defaults:
+              versions: [latest]
+            redirects:
+              - from: /a.html
+                to:   /b.html
+                type: exact
+        """)
+        rs = parse_file(f)
+        r = next(iter(rs))
+        assert r.from_url == "/de/latest/a.html"
+        assert r.to_url == "/de/latest/b.html"
+
+    def test_language_prefix_must_be_string(self, tmp_path: Path):
+        f = _write(tmp_path, "r.yaml", """
+            schema_version: 1
+            language_prefix: 42
+            redirects: []
+        """)
+        with pytest.raises(ParseError, match="'language_prefix' must be a string"):
+            parse_file(f)
+
 
 class TestMultiFile:
     def test_files_concatenate_sorted(self, tmp_path: Path):

@@ -271,6 +271,80 @@ class TestVersionResolution:
             )
 
 
+class TestLanguagePrefix:
+    def test_default_prefix_is_en(self):
+        records = _expand(
+            {"from": "/a.html", "to": "/b.html", "type": "exact", "versions": ["latest"]},
+        )
+        assert records[0].from_url == "/en/latest/a.html"
+
+    def test_custom_prefix(self):
+        records = expand_entry(
+            FILE,
+            INDEX,
+            {"from": "/a.html", "to": "/b.html", "type": "exact", "versions": ["latest"]},
+            None,
+            language_prefix="/de",
+        )
+        assert records[0].from_url == "/de/latest/a.html"
+        assert records[0].to_url == "/de/latest/b.html"
+
+    def test_custom_prefix_detects_qualified_correctly(self):
+        """A URL under the custom prefix is detected as fully-qualified."""
+        records = expand_entry(
+            FILE,
+            INDEX,
+            {"from": "/de/latest/a.html", "to": "/de/latest/b.html", "type": "exact"},
+            None,
+            language_prefix="/de",
+        )
+        assert records[0].from_url == "/de/latest/a.html"
+
+    def test_custom_prefix_rejects_mixing(self):
+        """``/en/...`` URLs are NOT fully-qualified when prefix is ``/de``."""
+        # /en/latest/a.html doesn't start with /de/, so it's path-only here.
+        # Mixed list (one starts with /de/, one with /en/) -> conflict.
+        with pytest.raises(ParseError, match="cannot mix"):
+            expand_entry(
+                FILE,
+                INDEX,
+                {
+                    "from": ["/de/latest/a.html", "/en/latest/b.html"],
+                    "to": "/c.html",
+                    "type": "exact",
+                },
+                defaults_versions=["latest"],
+                language_prefix="/de",
+            )
+
+    def test_empty_prefix_rejected(self):
+        with pytest.raises(ValueError, match="languageless"):
+            expand_entry(
+                FILE, INDEX,
+                {"from": "/a.html", "to": "/b.html", "type": "exact", "versions": ["latest"]},
+                None,
+                language_prefix="",
+            )
+
+    def test_prefix_must_start_with_slash(self):
+        with pytest.raises(ValueError, match="must start with"):
+            expand_entry(
+                FILE, INDEX,
+                {"from": "/a.html", "to": "/b.html", "type": "exact", "versions": ["latest"]},
+                None,
+                language_prefix="en",
+            )
+
+    def test_prefix_must_not_end_with_slash(self):
+        with pytest.raises(ValueError, match="must not end with"):
+            expand_entry(
+                FILE, INDEX,
+                {"from": "/a.html", "to": "/b.html", "type": "exact", "versions": ["latest"]},
+                None,
+                language_prefix="/en/",
+            )
+
+
 class TestErrorContext:
     def test_error_includes_file_and_index(self):
         with pytest.raises(ParseError, match=r"test\.yaml.*redirects\[0\]"):
