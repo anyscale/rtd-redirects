@@ -1,61 +1,257 @@
 # rtd-redirects
 
-Manage [Read the Docs](https://readthedocs.com/) redirects as code. A YAML file in your docs repo is the source of truth; this CLI reconciles it against the RtD v3 API.
+Manage [Read the Docs](https://readthedocs.com/) redirects as code. A YAML file in your docs repo is the source of truth; this CLI reconciles it against the [RtD v3 API](https://docs.readthedocs.com/platform/latest/api/v3.html).
 
 ## Status
 
-Pre-alpha. v0.1.0 in development. See the [design notes](https://github.com/anyscale/docs/blob/master/strategy/ray-docs/redirect-mgmt/design.md) for scope and rollout plan.
+v0.1.0 in development. Built for `docs.ray.io` IA-cleanup campaigns; the patterns generalize to any RtD project. Design rationale and full architecture are in [`anyscale/docs:strategy/ray-docs/redirect-mgmt/`](https://github.com/anyscale/docs/blob/master/strategy/ray-docs/redirect-mgmt/).
 
 ## Why
 
-Read the Docs has no bulk redirect import. Its dashboard UI requires clicking through each entry by hand, which makes any meaningful slug-rename or IA-cleanup campaign untenable at scale.
-
-`rtd-redirects` reads a YAML file from your repo, diffs it against the live RtD state via the [v3 API](https://docs.readthedocs.com/platform/latest/api/v3.html), and applies the diff. PR-time mode produces a git-only diff with no API calls. Merge-time mode applies via API.
+Read the Docs has no bulk redirect import. Its dashboard UI requires clicking through each entry by hand, which makes any meaningful slug-rename or IA-cleanup campaign untenable. `rtd-redirects` reads a YAML file from your repo, diffs it against the live RtD state, and applies the diff. PR-time mode produces a git-only diff with no API calls. Merge-time mode applies via API.
 
 ## Install
 
 ```bash
-pip install rtd-redirects
+git clone git@github.com:anyscale/rtd-redirects.git
+cd rtd-redirects
+pip install -e .
 ```
 
-## Usage
+Once `0.1.0` is published to PyPI, the installation simplifies to `pip install rtd-redirects`.
+
+## Quick start
 
 ```bash
-export RTD_API_TOKEN=...  # user token, never commit, never log
+# Auth: token never goes to disk; read from 1Password (or your secret store) into env.
+export RTD_API_TOKEN=$(op read "op://Personal/RtD/api-token")
 
-rtd-redirects dump   --project anyscale-ray --output redirects.yaml
-rtd-redirects plan   --project anyscale-ray --file redirects.yaml
-rtd-redirects apply  --project anyscale-ray --file redirects.yaml
-rtd-redirects audit  --project anyscale-ray --file redirects.yaml
+# Optional: avoid passing --project on every call.
+export RTD_PROJECT_SLUG=anyscale-ray
+
+# What's in RtD right now?
+rtd-redirects list
+
+# Dump the live state to YAML.
+rtd-redirects dump --output doc/redirects/current.yaml
+
+# Edit the YAML, then dry-check the diff.
+rtd-redirects plan --file doc/redirects/current.yaml
+
+# Apply (interactive — confirms before mutating).
+rtd-redirects apply --file doc/redirects/current.yaml
 ```
 
-Run `rtd-redirects --help` for the full command set.
+## Subcommands
 
-## YAML format
+### `list`
+
+Print every redirect currently configured on the RtD project.
+
+```bash
+rtd-redirects list --project anyscale-ray
+```
+
+### `dump`
+
+Export the RtD project's redirects to a YAML file (or stdout if `--output` is omitted).
+
+```bash
+rtd-redirects dump --project anyscale-ray --output doc/redirects/current.yaml
+```
+
+Output is collapsed: records sharing every field except `from_url` are written as a single multi-source entry with `from:` as a list.
+
+### `plan`
+
+Compute the diff between your YAML and the RtD project. No mutation.
+
+```bash
+rtd-redirects plan --project anyscale-ray --file doc/redirects/current.yaml
+```
+
+The output uses `+` for adds, `-` for deletes, `~` for updates, `@` for position-only reorders, plus a footer counting each phase.
+
+### `diff-file`
+
+Compute the redirect-level diff between two git refs of a YAML file. No RtD API calls — runs entirely from `git show`. This is the PR-time check engine.
+
+```bash
+rtd-redirects diff-file --file doc/redirects/current.yaml \
+    --base origin/master --head HEAD
+```
+
+### `apply`
+
+Apply the YAML to RtD. Confirms interactively unless `--yes` is set.
+
+```bash
+# Interactive
+rtd-redirects apply --project anyscale-ray --file doc/redirects/current.yaml
+
+# Non-interactive (CI)
+rtd-redirects apply --project anyscale-ray --file doc/redirects/current.yaml --yes
+```
+
+Operations run in order: deletes → adds → updates → reorders. Each emits a single audit line to stderr.
+
+### `audit`
+
+Report drift between your YAML and the RtD project. Exits non-zero on drift so CI can surface it.
+
+```bash
+rtd-redirects audit --project anyscale-ray --file doc/redirects/current.yaml
+```
+
+## YAML schema
+
+### Minimal
 
 ```yaml
 schema_version: 1
+redirects:
+  - from: /en/latest/old.html
+    to:   /en/latest/new.html
+    type: exact
+```
 
+### Multi-source
+
+One destination, several sources. Each source becomes its own RtD redirect record.
+
+```yaml
+schema_version: 1
+redirects:
+  - from:
+      - /en/latest/old1.html
+      - /en/latest/old2.html
+    to: /en/latest/new.html
+    type: exact
+```
+
+### Multi-version with defaults
+
+Fan a single rename across the active version set. Path-only URLs get qualified with `/<language_prefix>/<version>` per version.
+
+```yaml
+schema_version: 1
 defaults:
   versions: [latest, master]
-
 redirects:
   - from: /rllib/rllib-algorithms.html
     to:   /rllib/algorithms.html
     type: exact
-    description: "Drop redundant rllib- prefix"
 ```
 
-All five RtD redirect types (`page`, `exact`, `prefix`, `sphinx_html`, `sphinx_htmldir`) are supported, plus multi-source and multi-version expansion. Schema documentation lands alongside the parser module.
+Expands to four RtD records: `/en/latest/rllib/rllib-algorithms.html`, `/en/master/rllib/rllib-algorithms.html`, both pointing at their version-matched `/en/<v>/rllib/algorithms.html`.
+
+### Per-entry `versions:` override
+
+```yaml
+schema_version: 1
+defaults:
+  versions: [latest, master]
+redirects:
+  - from: /data/old.html
+    to:   /data/new.html
+    type: exact
+    versions: [latest]   # override: only redirect on latest, not master
+```
+
+### Cross-product (sources × versions)
+
+```yaml
+schema_version: 1
+redirects:
+  - from:
+      - /old1.html
+      - /old2.html
+    to: /new.html
+    type: exact
+    versions: [latest, master]
+```
+
+Expands to four records: latest×{old1, old2} and master×{old1, old2}.
+
+### Cross-host destination
+
+`to:` can be any absolute URL — useful for redirecting legacy docs to `docs.anyscale.com` or blog posts.
+
+```yaml
+schema_version: 1
+redirects:
+  - from: /en/latest/old.html
+    to:   https://docs.anyscale.com/new-thing
+    type: exact
+```
+
+`from:` must always be a project path. RtD only intercepts requests for paths it serves; external `from` URLs are rejected at parse time.
+
+### Custom language prefix
+
+The URL language segment is configurable per file. Default is `/en`.
+
+```yaml
+schema_version: 1
+language_prefix: /de
+defaults:
+  versions: [latest]
+redirects:
+  - from: /alt.html
+    to:   /neu.html
+    type: exact
+```
+
+Languageless RtD setups (no language segment) are not yet supported — see [`AGENTS.md`](AGENTS.md) for the deferred-work catalog.
+
+### Field reference
+
+| YAML field | RtD field | Default | Notes |
+|---|---|---|---|
+| `schema_version` | n/a | required | Top-level. Currently `1`. |
+| `language_prefix` | n/a | `/en` | Top-level. URL segment between host and version. |
+| `defaults.versions` | n/a | unset | Active version list for entries that inherit. |
+| `from` | `from_url` | required for `page`/`exact`/`prefix` | String or list. Must be a project path, not external. |
+| `to` | `to_url` | required for `page`/`exact`/`prefix` | String. Can be path-only, fully-qualified, or external (`https://`, `mailto:`, etc.). |
+| `type` | `type` | required | One of `page`, `exact`, `prefix`, `sphinx_html`, `sphinx_htmldir`. |
+| `versions` | n/a (expansion input) | falls back to `defaults.versions` | List of plain version names. Pattern identifiers (globs, ranges, exclusions, macros) are not yet supported. |
+| `status` | `http_status` | `301` | 3xx code. |
+| `force` | `force` | `false` | |
+| `enabled` | `enabled` | `true` | |
+| `description` | `description` | `""` | Operator notes. Surface in PR diff output. |
+| `position` | `position` | entry index | Set explicitly only when ordering matters. |
+
+## Environment variables
+
+| Variable | Required? | Purpose |
+|---|---|---|
+| `RTD_API_TOKEN` | required | Your RtD v3 API token. Never written to disk by the tool; never logged. Read from a secret store at the start of the shell session. |
+| `RTD_PROJECT_SLUG` | optional | Alternative to `--project` flag. |
+| `RTD_BASE_URL` | optional | API base. Defaults to `https://readthedocs.com/api/v3` (Business). Set to `https://readthedocs.org/api/v3` for Community. |
 
 ## Development
 
 ```bash
 git clone git@github.com:anyscale/rtd-redirects.git
 cd rtd-redirects
+python -m venv .venv && source .venv/bin/activate
 pip install -e .[dev]
-pytest
+pytest                       # 253 tests
+ruff check .                 # lint
 ```
+
+### Branch naming
+
+`doc-XXX-short-description` per the Anyscale docs team convention (where `DOC-XXX` is the Jira ticket key).
+
+### PR conventions
+
+- Reference `[DOC-XXX]` in the title or summary.
+- Include a test plan in the body.
+- Add or update tests for any module change.
+- Run `ruff check .` and `pytest` locally before pushing.
+
+For broader project intent, architecture, and the deferred-work roadmap, see [`AGENTS.md`](AGENTS.md).
 
 ## License
 
