@@ -213,6 +213,31 @@ class TestEntryValidation:
         with pytest.raises(ParseError, match="'from' must be a string"):
             parse_file(f)
 
+    def test_external_from_rejected(self, tmp_path: Path):
+        f = _write(tmp_path, "r.yaml", """
+            schema_version: 1
+            redirects:
+              - from: https://elsewhere.example.com/x
+                to:   /new.html
+                type: exact
+        """)
+        with pytest.raises(ParseError, match="'from' must be a project path"):
+            parse_file(f)
+
+    def test_external_to_accepted_in_canonical(self, tmp_path: Path):
+        """``to:`` with a scheme is a valid cross-host redirect target."""
+        f = _write(tmp_path, "r.yaml", """
+            schema_version: 1
+            redirects:
+              - from: /en/latest/old.html
+                to:   https://docs.anyscale.com/new
+                type: exact
+        """)
+        rs = parse_file(f)
+        r = next(iter(rs))
+        assert r.from_url == "/en/latest/old.html"
+        assert r.to_url == "https://docs.anyscale.com/new"
+
     def test_invalid_type_value(self, tmp_path: Path):
         f = _write(tmp_path, "r.yaml", """
             schema_version: 1
@@ -251,58 +276,111 @@ class TestEntryValidation:
             parse_file(f)
 
 
-class TestExpansionRejection:
-    """Multi-source / multi-version / defaults must fail clearly until expand.py lands."""
+class TestExpansionIntegration:
+    """Smoke tests that parse routes expansion-shaped entries through expand.py.
 
-    def test_list_from_rejected(self, tmp_path: Path):
+    Detailed expansion semantics live in tests/test_expand.py.
+    """
+
+    def test_top_level_defaults_drives_multi_version(self, tmp_path: Path):
+        f = _write(tmp_path, "r.yaml", """
+            schema_version: 1
+            defaults:
+              versions: [latest, master]
+            redirects:
+              - from: /a.html
+                to:   /b.html
+                type: exact
+        """)
+        rs = parse_file(f)
+        assert {r.from_url for r in rs} == {"/en/latest/a.html", "/en/master/a.html"}
+
+    def test_per_entry_versions_drives_multi_version(self, tmp_path: Path):
+        f = _write(tmp_path, "r.yaml", """
+            schema_version: 1
+            redirects:
+              - from: /a.html
+                to:   /b.html
+                type: exact
+                versions: [latest, master]
+        """)
+        rs = parse_file(f)
+        assert {r.from_url for r in rs} == {"/en/latest/a.html", "/en/master/a.html"}
+
+    def test_list_from_drives_multi_source(self, tmp_path: Path):
         f = _write(tmp_path, "r.yaml", """
             schema_version: 1
             redirects:
               - from:
-                  - /a
-                  - /b
-                to: /c
+                  - /en/latest/old1.html
+                  - /en/latest/old2.html
+                to: /en/latest/new.html
                 type: exact
         """)
-        with pytest.raises(ParseError, match="requires expand.py"):
-            parse_file(f)
+        rs = parse_file(f)
+        assert {r.from_url for r in rs} == {
+            "/en/latest/old1.html",
+            "/en/latest/old2.html",
+        }
+        assert {r.to_url for r in rs} == {"/en/latest/new.html"}
 
-    def test_list_to_rejected(self, tmp_path: Path):
-        f = _write(tmp_path, "r.yaml", """
-            schema_version: 1
-            redirects:
-              - from: /a
-                to:
-                  - /b
-                  - /c
-                type: exact
-        """)
-        with pytest.raises(ParseError, match="requires expand.py"):
-            parse_file(f)
-
-    def test_versions_key_rejected(self, tmp_path: Path):
-        f = _write(tmp_path, "r.yaml", """
-            schema_version: 1
-            redirects:
-              - from: /a
-                to: /b
-                type: exact
-                versions: [latest]
-        """)
-        with pytest.raises(ParseError, match="requires expand.py"):
-            parse_file(f)
-
-    def test_top_level_defaults_rejected(self, tmp_path: Path):
+    def test_fully_qualified_entries_stay_canonical_with_defaults(self, tmp_path: Path):
+        """If from is fully-qualified, defaults.versions does not fan out."""
         f = _write(tmp_path, "r.yaml", """
             schema_version: 1
             defaults:
-              versions: [latest]
+              versions: [latest, master]
             redirects:
-              - from: /a
-                to: /b
+              - from: /en/latest/a.html
+                to:   /en/latest/b.html
                 type: exact
         """)
-        with pytest.raises(ParseError, match="requires expand.py"):
+        rs = parse_file(f)
+        assert len(rs) == 1
+        assert next(iter(rs)).from_url == "/en/latest/a.html"
+
+    def test_defaults_must_be_mapping(self, tmp_path: Path):
+        f = _write(tmp_path, "r.yaml", """
+            schema_version: 1
+            defaults: oops
+            redirects: []
+        """)
+        with pytest.raises(ParseError, match="'defaults' must be a mapping"):
+            parse_file(f)
+
+    def test_defaults_versions_must_be_list(self, tmp_path: Path):
+        f = _write(tmp_path, "r.yaml", """
+            schema_version: 1
+            defaults:
+              versions: latest
+            redirects: []
+        """)
+        with pytest.raises(ParseError, match="'defaults.versions' must be a list"):
+            parse_file(f)
+
+    def test_custom_language_prefix(self, tmp_path: Path):
+        f = _write(tmp_path, "r.yaml", """
+            schema_version: 1
+            language_prefix: /de
+            defaults:
+              versions: [latest]
+            redirects:
+              - from: /a.html
+                to:   /b.html
+                type: exact
+        """)
+        rs = parse_file(f)
+        r = next(iter(rs))
+        assert r.from_url == "/de/latest/a.html"
+        assert r.to_url == "/de/latest/b.html"
+
+    def test_language_prefix_must_be_string(self, tmp_path: Path):
+        f = _write(tmp_path, "r.yaml", """
+            schema_version: 1
+            language_prefix: 42
+            redirects: []
+        """)
+        with pytest.raises(ParseError, match="'language_prefix' must be a string"):
             parse_file(f)
 
 

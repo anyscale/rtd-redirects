@@ -4,14 +4,18 @@ Reads one or more YAML files, validates the schema, and produces a canonical
 ``RedirectSet``. Error messages include the source file and the entry's
 position in the ``redirects:`` list so authors see exactly where to fix.
 
-Multi-source (``from:`` as a list), multi-version (``versions:`` keys), and
-top-level ``defaults:`` are expansion features handled by ``expand.py``. Until
-that module lands, this parser rejects them with a clear message pointing at
-the upcoming module rather than silently producing a different ``RedirectSet``.
+Expansion-shaped entries (list-valued ``from:``, per-entry ``versions:``, and
+path-only ``from:`` paired with top-level ``defaults.versions``) are routed to
+``expand.py``. Canonical 1:1 entries take the short path here.
+
+The URL language segment (``/en`` for ``docs.ray.io/en/latest/...``) is
+configurable per file via top-level ``language_prefix:``, defaulting to
+``/en``.
 """
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,18 +23,13 @@ from typing import Any
 
 import yaml
 
+from rtd_redirects.exceptions import ParseError
+from rtd_redirects.expand import DEFAULT_LANGUAGE_PREFIX, expand_entry, is_external
 from rtd_redirects.model import REDIRECT_TYPES, Redirect, RedirectSet
 
 SCHEMA_VERSION = 1
 
-_EXPANSION_NOT_YET_WIRED = (
-    "expansion feature (multi-source / multi-version) requires expand.py, "
-    "which is not yet wired into this parser"
-)
-
-
-class ParseError(Exception):
-    """Raised when YAML parsing or schema validation fails."""
+__all__ = ["ParseError", "SCHEMA_VERSION", "parse_file", "parse_files"]
 
 
 @dataclass(frozen=True)
@@ -80,9 +79,8 @@ def _parse_file(path: Path) -> Iterable[Redirect]:
         )
 
     _validate_schema_version(path, doc)
-
-    if "defaults" in doc:
-        raise ParseError(f"{path}: top-level 'defaults': {_EXPANSION_NOT_YET_WIRED}")
+    language_prefix = _read_language_prefix(path, doc)
+    defaults_versions = _read_defaults_versions(path, doc)
 
     redirects = doc.get("redirects")
     if redirects is None:
@@ -92,10 +90,12 @@ def _parse_file(path: Path) -> Iterable[Redirect]:
             f"{path}: 'redirects' must be a list, got {type(redirects).__name__}"
         )
 
-    return [
-        _parse_entry(_Ctx(file=path, index=i), entry)
-        for i, entry in enumerate(redirects)
-    ]
+    out: list[Redirect] = []
+    for i, entry in enumerate(redirects):
+        out.extend(_parse_entry(
+            _Ctx(file=path, index=i), entry, defaults_versions, language_prefix,
+        ))
+    return out
 
 
 def _validate_schema_version(path: Path, doc: dict[str, Any]) -> None:
@@ -109,27 +109,92 @@ def _validate_schema_version(path: Path, doc: dict[str, Any]) -> None:
         )
 
 
-def _parse_entry(ctx: _Ctx, entry: Any) -> Redirect:
+def _read_language_prefix(path: Path, doc: dict[str, Any]) -> str:
+    """Return top-level ``language_prefix:`` or the default ``/en``."""
+    value = doc.get("language_prefix")
+    if value is None:
+        return DEFAULT_LANGUAGE_PREFIX
+    if not isinstance(value, str):
+        raise ParseError(
+            f"{path}: 'language_prefix' must be a string, got {type(value).__name__}"
+        )
+    return value
+
+
+def _read_defaults_versions(path: Path, doc: dict[str, Any]) -> list[str] | None:
+    """Return ``defaults.versions`` from the top level, or ``None`` if absent."""
+    defaults = doc.get("defaults")
+    if defaults is None:
+        return None
+    if not isinstance(defaults, dict):
+        raise ParseError(
+            f"{path}: 'defaults' must be a mapping, got {type(defaults).__name__}"
+        )
+    versions = defaults.get("versions")
+    if versions is None:
+        return None
+    if not isinstance(versions, list):
+        raise ParseError(
+            f"{path}: 'defaults.versions' must be a list, "
+            f"got {type(versions).__name__}"
+        )
+    return versions
+
+
+def _parse_entry(
+    ctx: _Ctx,
+    entry: Any,
+    defaults_versions: list[str] | None,
+    language_prefix: str,
+) -> Iterable[Redirect]:
     if not isinstance(entry, dict):
         raise ParseError(
             f"{ctx.file}: redirects[{ctx.index}] must be a mapping, "
             f"got {type(entry).__name__}"
         )
 
-    if isinstance(entry.get("from"), list) or isinstance(entry.get("to"), list):
-        raise ParseError(
-            f"{ctx.file}: redirects[{ctx.index}]: list-valued 'from' or 'to': "
-            f"{_EXPANSION_NOT_YET_WIRED}"
-        )
-    if "versions" in entry:
-        raise ParseError(
-            f"{ctx.file}: redirects[{ctx.index}]: per-entry 'versions': "
-            f"{_EXPANSION_NOT_YET_WIRED}"
-        )
+    if _needs_expansion(entry, defaults_versions, language_prefix):
+        try:
+            return expand_entry(
+                ctx.file, ctx.index, entry, defaults_versions,
+                language_prefix=language_prefix,
+            )
+        except ValueError as e:
+            raise ParseError(f"{ctx.file}: {e}") from e
+    return [_parse_canonical(ctx, entry)]
 
+
+def _needs_expansion(
+    entry: dict[str, Any],
+    defaults_versions: list[str] | None,
+    language_prefix: str,
+) -> bool:
+    """True when an entry must be routed through ``expand_entry``."""
+    if isinstance(entry.get("from"), list) or isinstance(entry.get("to"), list):
+        return True
+    if "versions" in entry:
+        return True
+    from_value = entry.get("from")
+    if (
+        defaults_versions is not None
+        and isinstance(from_value, str)
+        and not re.match(rf"^{re.escape(language_prefix)}/[^/]+/", from_value)
+    ):
+        return True
+    return False
+
+
+def _parse_canonical(ctx: _Ctx, entry: dict[str, Any]) -> Redirect:
     _require_str(ctx, entry, "from")
     _require_str(ctx, entry, "to")
     _require_str(ctx, entry, "type")
+
+    if is_external(entry["from"]):
+        raise ParseError(
+            f"{ctx.file}: redirects[{ctx.index}]: 'from' must be a project path, "
+            f"not an external URL ({entry['from']!r}); RtD only redirects from "
+            "paths the project serves"
+        )
 
     type_ = entry["type"]
     if type_ not in REDIRECT_TYPES:
