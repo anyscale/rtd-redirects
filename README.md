@@ -187,6 +187,52 @@ redirects:
 
 `from:` must always be a project path. RtD only intercepts requests for paths it serves; external `from` URLs are rejected at parse time.
 
+### Wildcards (`*` and `:splat`)
+
+RtD supports a single suffix wildcard `*` in `from_url`, with `:splat` in `to_url` substituting the matched portion. Prefix and infix wildcards are not supported by RtD.
+
+```yaml
+schema_version: 1
+redirects:
+  # Bulk redirect every page under one prefix to the same path under another.
+  - from: /en/releases-2.40.0/*
+    to:   /en/latest/:splat
+    type: exact
+
+  # Combine with version expansion: one rule × N versions.
+  - from: /rllib/rllib/*
+    to:   /rllib/:splat
+    type: exact
+    versions: [latest, master]
+```
+
+The tool is a string passthrough for URL fields — `*` and `:splat` are stored as-is and interpreted by RtD at request time. Useful for the cohort cutover (legacy version slug → current) and prefix-collapse renames.
+
+### `page` redirects apply across all versions automatically
+
+A `page` redirect with `from: /old.html, to: /new.html` triggers on `/en/latest/old.html`, `/en/master/old.html`, every legacy version — **RtD handles the fan-out itself**. Don't pair `page` with `versions:` or `defaults.versions`; the tool ignores `defaults.versions` for `page` entries, and an explicit `versions:` raises a parse error.
+
+```yaml
+schema_version: 1
+defaults:
+  versions: [latest, master]   # applies only to `exact` entries below
+redirects:
+  - from: /old.html             # page: ignores defaults.versions
+    to:   /new.html
+    type: page
+  - from: /api.html             # exact: fans out to latest and master
+    to:   /api-v2.html
+    type: exact
+```
+
+Same applies to `clean_url_to_html` and `html_to_clean_url` — these describe project-wide URL transitions and don't need `from:` or `to:` at all.
+
+```yaml
+schema_version: 1
+redirects:
+  - type: html_to_clean_url     # turn /page.html into /page/
+```
+
 ### Custom language prefix
 
 The URL language segment is configurable per file. Default is `/en`.
@@ -211,10 +257,10 @@ Languageless RtD setups (no language segment) are not yet supported — see [`AG
 | `schema_version` | n/a | required | Top-level. Currently `1`. |
 | `language_prefix` | n/a | `/en` | Top-level. URL segment between host and version. |
 | `defaults.versions` | n/a | unset | Active version list for entries that inherit. |
-| `from` | `from_url` | required for `page`/`exact`/`prefix` | String or list. Must be a project path, not external. |
-| `to` | `to_url` | required for `page`/`exact`/`prefix` | String. Can be path-only, fully-qualified, or external (`https://`, `mailto:`, etc.). |
-| `type` | `type` | required | One of `page`, `exact`, `prefix`, `sphinx_html`, `sphinx_htmldir`. |
-| `versions` | n/a (expansion input) | falls back to `defaults.versions` | List of plain version names. Pattern identifiers (globs, ranges, exclusions, macros) are not yet supported. |
+| `from` | `from_url` | required for `page` and `exact` | String or list. Must be a project path, not external. Optional for `clean_url_to_html` / `html_to_clean_url`. |
+| `to` | `to_url` | required for `page` and `exact` | String. Path-only, fully-qualified, or external (`https://`, `mailto:`, etc.). Optional for `clean_url_to_html` / `html_to_clean_url`. |
+| `type` | `type` | required | One of `page`, `exact`, `clean_url_to_html`, `html_to_clean_url`. Only `exact` uses `versions:` / `defaults.versions`; the others apply project-wide on RtD's side. |
+| `versions` | n/a (expansion input) | falls back to `defaults.versions` | List of plain version names. Pattern identifiers (globs, ranges, exclusions, macros) are not yet supported. Only valid on `type: exact`. |
 | `status` | `http_status` | `301` | 3xx code. |
 | `force` | `force` | `false` | |
 | `enabled` | `enabled` | `true` | |

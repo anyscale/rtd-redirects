@@ -42,7 +42,12 @@ from typing import Any
 from urllib.parse import urlparse
 
 from rtd_redirects.exceptions import ParseError
-from rtd_redirects.model import REDIRECT_TYPES, Redirect
+from rtd_redirects.model import (
+    REDIRECT_TYPES,
+    URL_STYLE_TYPES,
+    VERSION_AGNOSTIC_TYPES,
+    Redirect,
+)
 
 DEFAULT_LANGUAGE_PREFIX = "/en"
 """Default RtD-style language URL segment. Override per call via ``language_prefix=``."""
@@ -72,12 +77,22 @@ def expand_entry(
     supported.
     """
     _validate_language_prefix(language_prefix)
-    from_list = _read_from(file, index, entry)
-    to_value = _read_to(file, index, entry)
     type_value = _read_type(file, index, entry)
-    versions = _resolve_versions(
-        file, index, entry, from_list, defaults_versions, language_prefix,
-    )
+    from_list = _read_from(file, index, entry, type_value)
+    to_value = _read_to(file, index, entry, type_value)
+
+    if type_value in VERSION_AGNOSTIC_TYPES:
+        if "versions" in entry:
+            raise _err(
+                file, index,
+                f"'versions:' is not supported on type {type_value!r}; "
+                "RtD applies this redirect type across all versions automatically",
+            )
+        versions: list[str | None] = [None]
+    else:
+        versions = _resolve_versions(
+            file, index, entry, from_list, defaults_versions, language_prefix,
+        )
 
     records: list[Redirect] = []
     for version in versions:
@@ -111,9 +126,16 @@ def _validate_language_prefix(prefix: str) -> None:
         raise ValueError(f"language_prefix must not end with '/', got {prefix!r}")
 
 
-def _read_from(file: Path, index: int, entry: dict[str, Any]) -> list[str]:
+def _read_from(file: Path, index: int, entry: dict[str, Any], type_value: str) -> list[str]:
+    """Read ``from:`` for an entry. URL-style types (``clean_url_to_html`` /
+    ``html_to_clean_url``) describe project-wide URL transitions and don't
+    require this field on the API; missing/empty values produce a single
+    empty-string entry that ``_to_api`` will omit.
+    """
     value = entry.get("from")
     if value is None:
+        if type_value in URL_STYLE_TYPES:
+            return [""]
         raise _err(file, index, "missing required field 'from'")
     if isinstance(value, str):
         result = [value]
@@ -133,7 +155,7 @@ def _read_from(file: Path, index: int, entry: dict[str, Any]) -> list[str]:
             f"'from' must be a string or list of strings, got {type(value).__name__}",
         )
     for url in result:
-        if is_external(url):
+        if url and is_external(url):
             raise _err(
                 file, index,
                 f"'from' must be a project path, not an external URL ({url!r}); "
@@ -142,9 +164,12 @@ def _read_from(file: Path, index: int, entry: dict[str, Any]) -> list[str]:
     return result
 
 
-def _read_to(file: Path, index: int, entry: dict[str, Any]) -> str:
+def _read_to(file: Path, index: int, entry: dict[str, Any], type_value: str) -> str:
+    """Read ``to:`` for an entry. URL-style types may omit this."""
     value = entry.get("to")
     if value is None:
+        if type_value in URL_STYLE_TYPES:
+            return ""
         raise _err(file, index, "missing required field 'to'")
     if not isinstance(value, str):
         raise _err(file, index, f"'to' must be a string, got {type(value).__name__}")

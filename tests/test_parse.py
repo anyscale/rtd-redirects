@@ -276,6 +276,85 @@ class TestEntryValidation:
             parse_file(f)
 
 
+class TestVersionAgnosticTypes:
+    """page and URL-style types skip version expansion at the parse layer."""
+
+    def test_page_with_defaults_versions_stays_path_only(self, tmp_path: Path):
+        f = _write(tmp_path, "r.yaml", """
+            schema_version: 1
+            defaults:
+              versions: [latest, master]
+            redirects:
+              - from: /old.html
+                to:   /new.html
+                type: page
+        """)
+        rs = parse_file(f)
+        assert len(rs) == 1
+        r = next(iter(rs))
+        assert r.from_url == "/old.html"
+        assert r.to_url == "/new.html"
+
+    def test_mixed_page_and_exact_with_defaults(self, tmp_path: Path):
+        f = _write(tmp_path, "r.yaml", """
+            schema_version: 1
+            defaults:
+              versions: [latest, master]
+            redirects:
+              - from: /old.html
+                to:   /new.html
+                type: page
+              - from: /api.html
+                to:   /api-v2.html
+                type: exact
+        """)
+        rs = parse_file(f)
+        # page stays path-only; exact fans out to 2 records
+        assert len(rs) == 3
+        page_records = [r for r in rs if r.type == "page"]
+        exact_records = [r for r in rs if r.type == "exact"]
+        assert len(page_records) == 1
+        assert page_records[0].from_url == "/old.html"
+        assert len(exact_records) == 2
+        assert {r.from_url for r in exact_records} == {
+            "/en/latest/api.html", "/en/master/api.html",
+        }
+
+    def test_clean_url_to_html_no_from_to_required(self, tmp_path: Path):
+        f = _write(tmp_path, "r.yaml", """
+            schema_version: 1
+            redirects:
+              - type: clean_url_to_html
+        """)
+        rs = parse_file(f)
+        r = next(iter(rs))
+        assert r.type == "clean_url_to_html"
+        assert r.from_url == ""
+        assert r.to_url == ""
+
+    def test_html_to_clean_url_no_from_to_required(self, tmp_path: Path):
+        f = _write(tmp_path, "r.yaml", """
+            schema_version: 1
+            redirects:
+              - type: html_to_clean_url
+        """)
+        rs = parse_file(f)
+        r = next(iter(rs))
+        assert r.type == "html_to_clean_url"
+
+    def test_wildcard_round_trip_through_canonical_page(self, tmp_path: Path):
+        f = _write(tmp_path, "r.yaml", """
+            schema_version: 1
+            redirects:
+              - from: /api/*
+                to:   /api/v1/:splat
+                type: page
+        """)
+        r = next(iter(parse_file(f)))
+        assert r.from_url == "/api/*"
+        assert r.to_url == "/api/v1/:splat"
+
+
 class TestExpansionIntegration:
     """Smoke tests that parse routes expansion-shaped entries through expand.py.
 

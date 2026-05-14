@@ -14,9 +14,24 @@ from dataclasses import dataclass, field
 REDIRECT_TYPES: frozenset[str] = frozenset({
     "page",
     "exact",
-    "prefix",
-    "sphinx_html",
-    "sphinx_htmldir",
+    "clean_url_to_html",
+    "html_to_clean_url",
+})
+
+# Types that RtD applies across all versions automatically. These don't use
+# our YAML-side ``defaults.versions`` or ``versions:`` expansion; the redirect
+# applies project-wide on RtD's side regardless.
+VERSION_AGNOSTIC_TYPES: frozenset[str] = frozenset({
+    "page",
+    "clean_url_to_html",
+    "html_to_clean_url",
+})
+
+# Types where RtD doesn't require ``from_url`` / ``to_url`` on the API. They
+# describe a URL-style transition for the whole project, not a per-page rule.
+URL_STYLE_TYPES: frozenset[str] = frozenset({
+    "clean_url_to_html",
+    "html_to_clean_url",
 })
 
 

@@ -47,6 +47,23 @@ The MVP is ~1000 LOC across nine modules. Each is documented at the top of the f
 - **`apply` runs in safe order**: deletes free identities; adds create; updates settle data; reorders fix positions last so the position counter doesn't churn during data changes.
 - **Reorders are mutually exclusive with updates** — a position-plus-other-field change is an update (one PUT sets both); a position-only change is a reorder.
 
+## Redirect types (current RtD API, verified May 2026)
+
+RtD's current v3 API supports exactly four redirect types. Our `model.REDIRECT_TYPES` matches.
+
+| Type | `from`/`to` required? | Version semantics | Use case |
+|---|---|---|---|
+| `page` | yes | **applies across all versions automatically** (`VERSION_AGNOSTIC_TYPES`) | path rename that should hit every version RtD serves |
+| `exact` | yes | per-URL match including version segment | path rename scoped to specific version(s); the IA-cleanup workhorse |
+| `clean_url_to_html` | no (`URL_STYLE_TYPES`) | project-wide URL transition | `/page/` → `/page.html` style switch |
+| `html_to_clean_url` | no (`URL_STYLE_TYPES`) | project-wide URL transition | `/page.html` → `/page/` style switch |
+
+**Critical consequence**: only `type: exact` uses `versions:` / `defaults.versions`. `page` and the URL-style types skip our expansion logic entirely — RtD's API handles fan-out across versions on its side. Mixing `page` and `exact` under one `defaults.versions` is the natural authoring pattern; the tool routes each through the correct path automatically.
+
+**Wildcards**: `*` is allowed only as a *suffix* in `from_url`. `:splat` in `to_url` substitutes the matched portion. The tool is a string passthrough for these — they're stored verbatim and interpreted by RtD at request time.
+
+**Removed from older designs**: `prefix`, `sphinx_html`, and `sphinx_htmldir` (legacy type names in `design.md`). RtD's current API doesn't accept these — wildcards replaced `prefix`, and `clean_url_to_html` / `html_to_clean_url` replaced the Sphinx-builder transitions.
+
 ## Conventions
 
 ### Branch and PR
@@ -101,7 +118,8 @@ Captured here so it doesn't get lost. Listed in rough priority order.
    - Require explicit `known_versions:` list at YAML top level.
    - Infer from `defaults.versions` + per-entry `versions:`.
    - Use live version list (same lift as the pattern-identifier feature).
-   Pre-requisite if `docs.ray.io` ever drops `/en`.
+   Pre-requisite if `docs.ray.io` ever drops `/en`. Note: the *migration* from `/en/...` to `/...` can be done today with a single suffix-wildcard exact redirect (`/en/*` → `/:splat`); the deferred work is ongoing YAML authoring AFTER the prefix is gone.
+1. **Wildcard `*` placement validation** — RtD only accepts suffix wildcards. We pass URL strings through without checking; an infix or prefix `*` (e.g. `/foo/*/bar`) would be rejected by the API at apply time with a clearer error than we could give. Could add a parse-time check, but the cost/benefit is marginal — agents writing redirects rarely make this mistake, and RtD's error is informative.
 1. **Source-file + line tracking on `Redirect`** — design.md asks `apply` to log per-entry with "source YAML file and line number". Currently `apply` only logs the URL. Adding requires `source_file: Path | None` and `source_line: int | None` fields on `Redirect` (with `compare=False`), populated by `parse` and `expand`, surfaced by `apply` log lines.
 1. **Flask integration test fixture** — design.md mentions a `pytest` fixture with a Flask server that models the v3 API. Currently we only have unit tests with mocks. Worth adding once a real apply hits an edge the mocks didn't cover.
 1. **`apply --no-delete`** — design.md mentions a flag that skips destructive operations and applies only adds/updates. Useful for cautious first runs.
