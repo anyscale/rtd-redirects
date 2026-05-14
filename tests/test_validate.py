@@ -7,6 +7,7 @@ from rtd_redirects.validate import (
     _is_strict_subset,
     _pattern_for,
     _patterns_overlap,
+    fix_ordering,
     validate,
 )
 
@@ -215,6 +216,73 @@ class TestDeterminism:
         a = [(f.severity, f.kind, f.message) for f in validate(rs)]
         b = [(f.severity, f.kind, f.message) for f in validate(rs)]
         assert a == b
+
+
+class TestFixOrdering:
+    def test_swaps_unreachable_pair(self):
+        rs = RedirectSet([
+            _r("/api/*", "/v2/:splat", type="page", position=0),
+            _r("/api/v1/foo.html", "/v2/foo.html", type="page", position=1),
+        ])
+        fixed = fix_ordering(rs)
+        positions = {r.from_url: r.position for r in fixed}
+        assert positions["/api/v1/foo.html"] < positions["/api/*"]
+
+    def test_already_correct_set_unchanged(self):
+        rs = RedirectSet([
+            _r("/api/v1/foo.html", "/v2/foo.html", type="page", position=0),
+            _r("/api/*", "/v2/:splat", type="page", position=1),
+        ])
+        fixed = fix_ordering(rs)
+        # All positions stay the same.
+        for original, after in zip(sorted(rs, key=lambda r: r.from_url),
+                                    sorted(fixed, key=lambda r: r.from_url),
+                                    strict=True):
+            assert original.position == after.position
+
+    def test_three_level_chain(self):
+        """A ⊊ B ⊊ C should produce A.pos < B.pos < C.pos."""
+        rs = RedirectSet([
+            _r("/api/*", "/v2/:splat", type="page", position=0),  # most general
+            _r("/api/v1/*", "/v2/v1/:splat", type="page", position=1),
+            _r("/api/v1/foo.html", "/v2/v1/foo.html", type="page", position=2),  # most specific
+        ])
+        fixed = fix_ordering(rs)
+        positions = {r.from_url: r.position for r in fixed}
+        assert positions["/api/v1/foo.html"] < positions["/api/v1/*"]
+        assert positions["/api/v1/*"] < positions["/api/*"]
+
+    def test_disjoint_groups_kept_near_original_position(self):
+        rs = RedirectSet([
+            _r("/foo/*", "/new-foo/:splat", type="page", position=0),
+            _r("/bar/*", "/new-bar/:splat", type="page", position=1),
+        ])
+        fixed = fix_ordering(rs)
+        positions = {r.from_url: r.position for r in fixed}
+        # Stable tiebreaker by original position
+        assert positions["/foo/*"] == 0
+        assert positions["/bar/*"] == 1
+
+    def test_fix_is_deterministic(self):
+        rs = RedirectSet([
+            _r("/api/*", "/v2/:splat", type="page", position=0),
+            _r("/api/v1/foo.html", "/v2/foo.html", type="page", position=1),
+            _r("/data/old.html", "/data/new.html", type="page", position=2),
+        ])
+        a = sorted(fix_ordering(rs), key=lambda r: r.position)
+        b = sorted(fix_ordering(rs), key=lambda r: r.position)
+        assert [(r.from_url, r.position) for r in a] == [(r.from_url, r.position) for r in b]
+
+    def test_validate_after_fix_is_clean(self):
+        """Round-trip: fix_ordering then validate should produce no ordering errors."""
+        rs = RedirectSet([
+            _r("/api/*", "/v2/:splat", type="page", position=0),
+            _r("/api/v1/foo.html", "/v2/foo.html", type="page", position=1),
+            _r("/api/v1/*", "/v2/v1/:splat", type="page", position=2),
+        ])
+        fixed = fix_ordering(rs)
+        ordering_findings = [f for f in validate(fixed) if f.kind == "ordering"]
+        assert ordering_findings == []
 
 
 class TestForceInteraction:

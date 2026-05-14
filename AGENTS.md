@@ -37,7 +37,7 @@ The MVP is ~1000 LOC across nine modules. Each is documented at the top of the f
 | `diff_file.py` | Git-only PR-time diff. Reads YAML at two refs via `git show`, runs each through `parse_text`, returns a `Diff`. No API. |
 | `apply.py` | Drives a `Diff` against `RtdClient` in safe order: deletes → adds → updates → reorders. Per-entry stderr audit log. |
 | `validate.py` | Rules-based ordering and chain detection over a `RedirectSet`. Flags unreachable rules (specific-with-higher-position-than-general) and chain candidates (A.to matches B.from). |
-| `cli.py` | `argparse` entry point. Wires the six subcommands: `list`, `dump`, `plan`, `diff-file`, `apply`, `audit`. Validation runs always on `audit` and on `plan` / `apply` with `--strict`. |
+| `cli.py` | `argparse` entry point. Wires seven subcommands: `list`, `dump`, `plan`, `diff-file`, `apply`, `audit`, `validate`. Validation runs always on `audit` and `validate`, and on `plan` / `apply` with `--strict`. |
 
 ## Key design choices
 
@@ -67,7 +67,13 @@ RtD's current v3 API supports exactly four redirect types. Our `model.REDIRECT_T
 
 **Inactive versions and slug renames**: deactivating a version on RtD deletes its artifacts and serves 404 for its URLs. Slug renames have the same effect on old-slug URLs. Because `force: false` is the default and redirects fire on 404, both events automatically route the affected URLs through any matching wildcard or page redirect. This is a feature, not a bug — designers can defer "what happens to legacy version URLs" until they're ready to deactivate.
 
-**Chains**: RtD doesn't promise server-side chain resolution. If `/a → /b` and `/b → /c` are configured, the browser follows both 3xx responses. Author each `from` pointing at the *final* `to`. RtD's infinite-redirect detector returns 404 as a failsafe but isn't a substitute for clean authoring. A future `audit` mode could detect chains; see deferred work.
+**Chains**: RtD doesn't promise server-side chain resolution. If `/a → /b` and `/b → /c` are configured, the browser follows both 3xx responses. Author each `from` pointing at the *final* `to`. RtD's infinite-redirect detector returns 404 as a failsafe but isn't a substitute for clean authoring. Today's `validate.py` flags chain candidates as warnings.
+
+### Local validation and pre-commit
+
+Agents authoring redirects (and humans editing them) should reach for `rtd-redirects validate <file>` first — it runs the validator without needing project credentials or API access. The hook surface for `pre-commit` lives at the repo root (`.pre-commit-hooks.yaml`) so consumer projects can wire `id: rtd-redirects-validate` into their `.pre-commit-config.yaml`.
+
+`--fix` reorders deterministically by `(specificity, original_position, from_url, type)`. The rewrite is lossy on comments and authoring formatting but byte-stable on the canonical record set; re-running on a clean file is a no-op. Chains are not auto-fixed — they require choosing the right destination and that's an authoring decision.
 
 ### Preferred pattern for IA-cleanup redirects: `page` + `force: false` + `*`/`:splat`
 

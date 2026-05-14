@@ -29,6 +29,7 @@ let chains slip through, which is the worse failure mode.
 
 from __future__ import annotations
 
+import dataclasses
 import re
 from dataclasses import dataclass, field
 from typing import Literal
@@ -48,6 +49,56 @@ class Finding:
     kind: Kind
     message: str
     rules: tuple[Redirect, ...] = field(default_factory=tuple)
+
+
+def fix_ordering(
+    rs: RedirectSet,
+    *,
+    language_prefix: str = DEFAULT_LANGUAGE_PREFIX,
+) -> RedirectSet:
+    """Reorder rules so every (A ⊊ B) pair has ``A.position < B.position``.
+
+    Deterministic: sorts by ``(-superset_count, original_position, from_url, type)``.
+    A rule with more supersets is more specific and needs to come first;
+    original position breaks ties so disjoint groups stay near where the
+    author placed them; from_url and type are final tiebreakers for
+    byte-stable output.
+
+    URL-style types (no comparable ``from`` URL) sort by original position
+    only and keep their relative order.
+
+    Only ``position`` fields change. Identity and data fields are preserved.
+    """
+    rules = list(rs)
+    patterns = [_pattern_for(r, language_prefix) for r in rules]
+
+    counts = [
+        sum(
+            1 for j, pj in enumerate(patterns)
+            if i != j and pi is not None and pj is not None
+            and _is_strict_subset(pi, pj)
+        )
+        for i, pi in enumerate(patterns)
+    ]
+
+    indexed = sorted(
+        range(len(rules)),
+        key=lambda i: (
+            -counts[i],
+            rules[i].position,
+            rules[i].from_url,
+            rules[i].type,
+        ),
+    )
+
+    new_rules: list[Redirect] = []
+    for new_position, original_index in enumerate(indexed):
+        rule = rules[original_index]
+        if rule.position == new_position:
+            new_rules.append(rule)
+        else:
+            new_rules.append(dataclasses.replace(rule, position=new_position))
+    return RedirectSet(new_rules)
 
 
 def validate(

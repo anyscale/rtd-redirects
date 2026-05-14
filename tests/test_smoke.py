@@ -25,6 +25,7 @@ def test_cli_main_is_callable():
         ["diff-file", "--file", "redirects.yaml"],
         ["apply", "--file", "redirects.yaml"],
         ["audit", "--file", "redirects.yaml"],
+        ["validate", "redirects.yaml"],
     ],
 )
 def test_cli_registers_subcommand(argv: list[str]):

@@ -103,9 +103,46 @@ Report drift between your YAML and the RtD project, plus ordering / chain valida
 rtd-redirects audit --project anyscale-ray --file doc/redirects/current.yaml
 ```
 
-### Validation (`--strict` on `plan` / `apply`, always on `audit`)
+### `validate`
 
-The tool can deterministically check that your rules are ordered correctly — most specific first, no unreachable rules, no client-side chains. Useful as the redirect set grows past a few dozen entries.
+Validate ordering and chain risks in one or more YAML files. **No RtD credentials required** — intended for local use by agents authoring redirects and for pre-commit hooks.
+
+```bash
+# Single file
+rtd-redirects validate doc/redirects/current.yaml
+
+# Multiple files (pre-commit passes them this way)
+rtd-redirects validate doc/redirects/*.yaml
+
+# Auto-fix ordering errors in place (chains are left as warnings)
+rtd-redirects validate doc/redirects/current.yaml --fix
+```
+
+Two finding kinds:
+
+- **`ERROR ordering`** — rule A's match set is a strict subset of rule B's, but A's position is higher. B fires first; A is unreachable. Lower A's position so it comes before B. `--fix` reorders deterministically.
+- **`WARNING chain`** — rule A's `to` could match rule B's `from`. A request would 3xx to A.to and the browser would follow to B for another 3xx. Rewrite A's `to` to point directly at the final destination. Not auto-fixed (requires choosing the right destination).
+
+Validation is rules-based and decidable in closed form because RtD's pattern surface is intentionally narrow (suffix `*` only, four redirect types, no embedded wildcards). URL-style types (`clean_url_to_html` / `html_to_clean_url`) are excluded since they have no `from` URL to compare.
+
+#### Pre-commit integration
+
+This repo ships a [`.pre-commit-hooks.yaml`](.pre-commit-hooks.yaml). Add to your project's `.pre-commit-config.yaml`:
+
+```yaml
+repos:
+  - repo: https://github.com/anyscale/rtd-redirects
+    rev: v0.1.0   # pin to a tag once one is published
+    hooks:
+      - id: rtd-redirects-validate
+        files: ^doc/redirects/.*\.ya?ml$
+```
+
+The hook fails the commit on any `ERROR` finding. Run `pre-commit run rtd-redirects-validate --all-files` locally to surface issues before pushing.
+
+#### `--strict` on `plan` / `apply`
+
+`validate` is also wired into the project-bound commands for CI use:
 
 ```bash
 # Dry-check ordering during plan
@@ -115,12 +152,11 @@ rtd-redirects plan --project anyscale-ray --file doc/redirects/current.yaml --st
 rtd-redirects apply --project anyscale-ray --file doc/redirects/current.yaml --strict --yes
 ```
 
-Two finding kinds:
+`audit` runs the validator unconditionally and exits non-zero if either drift or validation errors exist (drift is exit 1, validation error is exit 6; validation takes precedence).
 
-- **`ERROR ordering`** — rule A's match set is a strict subset of rule B's, but A's position is higher. B fires first; A is unreachable. Lower A's position so it comes before B.
-- **`WARNING chain`** — rule A's `to` could match rule B's `from`. A request would 3xx to A.to and the browser would follow to B for another 3xx. Rewrite A's `to` to point directly at B's `to`.
+#### Auto-fix caveats
 
-Validation is rules-based and decidable in closed form because RtD's pattern surface is intentionally narrow (suffix `*` only, four redirect types, no embedded wildcards). URL-style types (`clean_url_to_html` / `html_to_clean_url`) are excluded since they have no `from` URL to compare.
+`--fix` rewrites the YAML using the parsed `RedirectSet`, which loses comments and authoring formatting (`schema_version`, `language_prefix`, and `defaults` are preserved). Run `--fix`, review the diff, and commit. The reordering is deterministic — sorted by `(specificity, original position, from_url, type)` — so re-running on a clean file is a no-op.
 
 ## YAML schema
 

@@ -485,6 +485,102 @@ class TestAuditFindings:
         assert rc == EXIT_DRIFT
 
 
+class TestValidateSubcommand:
+    """`validate` is the API-free entry point for local agents and pre-commit."""
+
+    def test_clean_file_exits_ok(
+        self, tmp_path: Path, factory, capsys: pytest.CaptureFixture,
+    ):
+        f = _write_yaml(tmp_path / "r.yaml", """
+            schema_version: 1
+            redirects:
+              - from: /a
+                to:   /b
+                type: exact
+        """)
+        rc = main(["validate", str(f)], client_factory=factory)
+        assert rc == EXIT_OK
+        assert "ok" in capsys.readouterr().err
+
+    def test_unreachable_rule_flagged(
+        self, tmp_path: Path, factory, capsys: pytest.CaptureFixture,
+    ):
+        f = _write_yaml(tmp_path / "r.yaml", _UNREACHABLE_YAML)
+        rc = main(["validate", str(f)], client_factory=factory)
+        assert rc == EXIT_VALIDATION
+        err = capsys.readouterr().err
+        assert "ERROR ordering" in err
+
+    def test_multiple_files(
+        self, tmp_path: Path, factory, capsys: pytest.CaptureFixture,
+    ):
+        clean = _write_yaml(tmp_path / "clean.yaml", """
+            schema_version: 1
+            redirects:
+              - from: /a
+                to: /b
+                type: exact
+        """)
+        bad = _write_yaml(tmp_path / "bad.yaml", _UNREACHABLE_YAML)
+        rc = main(["validate", str(clean), str(bad)], client_factory=factory)
+        assert rc == EXIT_VALIDATION
+        err = capsys.readouterr().err
+        assert "clean.yaml: ok" in err
+        assert "bad.yaml" in err
+        assert "ERROR ordering" in err
+
+    def test_fix_rewrites_file_and_exits_clean(
+        self, tmp_path: Path, factory, capsys: pytest.CaptureFixture,
+    ):
+        f = _write_yaml(tmp_path / "r.yaml", _UNREACHABLE_YAML)
+        rc = main(["validate", str(f), "--fix"], client_factory=factory)
+        assert rc == EXIT_OK
+        # File now passes validation
+        rc_after = main(["validate", str(f)], client_factory=factory)
+        assert rc_after == EXIT_OK
+
+    def test_fix_preserves_top_level_metadata(
+        self, tmp_path: Path, factory,
+    ):
+        f = _write_yaml(tmp_path / "r.yaml", """
+            schema_version: 1
+            language_prefix: /en
+            defaults:
+              versions: [latest]
+            redirects:
+              - from: /api/*
+                to:   /v2/:splat
+                type: exact
+              - from: /api/v1/foo.html
+                to:   /v2/foo.html
+                type: exact
+        """)
+        rc = main(["validate", str(f), "--fix"], client_factory=factory)
+        assert rc == EXIT_OK
+        rewritten = yaml.safe_load(f.read_text())
+        assert rewritten["schema_version"] == 1
+        assert rewritten["language_prefix"] == "/en"
+        assert rewritten["defaults"]["versions"] == ["latest"]
+
+    def test_no_api_required(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ):
+        """validate must work without RTD_API_TOKEN — used by pre-commit hooks."""
+        monkeypatch.delenv("RTD_API_TOKEN", raising=False)
+        f = _write_yaml(tmp_path / "r.yaml", """
+            schema_version: 1
+            redirects:
+              - from: /a
+                to: /b
+                type: exact
+        """)
+        # Factory shouldn't even be invoked. Use a poisoned factory to prove it.
+        def poisoned(_slug):
+            raise RuntimeError("RtD client should not be constructed")
+        rc = main(["validate", str(f)], client_factory=poisoned)
+        assert rc == EXIT_OK
+
+
 class TestErrorHandling:
     def test_parse_error_returns_exit_parse(
         self, tmp_path: Path, factory, capsys: pytest.CaptureFixture,
