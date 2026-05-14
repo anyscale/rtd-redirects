@@ -233,6 +233,47 @@ redirects:
   - type: html_to_clean_url     # turn /page.html into /page/
 ```
 
+### Rule ordering: specific before general
+
+RtD picks the first redirect whose `from` matches the request URL — **position-based first-match, not specificity-based**. To make a specific rule override a catch-all wildcard, give the specific rule a lower `position` (or just write it earlier in the YAML; `position` defaults to entry index).
+
+```yaml
+schema_version: 1
+redirects:
+  # Specific override fires first (position 0).
+  - from: /en/releases-2.40.0/api/special_case.html
+    to:   /en/latest/api/its_new_home.html
+    type: exact
+
+  # Catch-all wildcard fires for everything else under that version (position 1).
+  - from: /en/releases-2.40.0/*
+    to:   /en/latest/:splat
+    type: exact
+```
+
+The tool preserves ordering across `dump` / `parse` / `apply`. `diff` flags position-only changes as `reorder` and runs them in a separate pass at apply time so positions settle without churning the data phase.
+
+### Inactive versions and slug renames
+
+When you mark a version inactive on RtD, its artifacts are deleted and its URLs start returning 404. Combined with `force: false` (redirects fire on 404), this means **deactivating a version automatically routes its URLs through any matching redirect rule**. Your wildcard catch-all picks up all the old paths without any extra work.
+
+Renaming a version slug has the same effect — old-slug URLs return 404, and matching wildcard rules fire. RtD's own docs suggest pairing slug renames with an `exact` wildcard:
+
+```yaml
+# After renaming releases-2.40.0 -> v2.40.0:
+- from: /en/releases-2.40.0/*
+  to:   /en/v2.40.0/:splat
+  type: exact
+```
+
+(There's a [known corner case](https://github.com/readthedocs/readthedocs.org/issues/9335) where an inactive version's HTML can linger in storage and produce an infinite-redirect loop. RtD's infinite-redirect detector returns 404 as a failsafe; worth knowing about if you see one in practice.)
+
+### Avoid chained redirects
+
+RtD doesn't promise to resolve chains server-side. If `/a → /b` and `/b → /c` are both configured, RtD serves two 3xx responses (the browser follows each hop). Write each `from` pointing **directly at the final destination** rather than relying on the chain to collapse. If you renamed `/old → /intermediate → /current` over time, the final rule should be `/old → /current` (rewrite the existing redirect, don't stack).
+
+If RtD detects an infinite loop, it returns 404 and stops trying — useful failsafe, but not a substitute for clean authoring.
+
 ### Robust fan-out: `page` + `force: false` + `*`/`:splat`
 
 RtD's redirect rules default to `force: false`, which means **a redirect only fires when the source URL would otherwise 404**. Combined with `page` (applies across all versions) and a suffix wildcard, you get a single rule that does the right thing on every version without having to enumerate which versions it applies to.

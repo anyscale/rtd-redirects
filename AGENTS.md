@@ -62,6 +62,12 @@ RtD's current v3 API supports exactly four redirect types. Our `model.REDIRECT_T
 
 **Wildcards**: `*` is allowed only as a *suffix* in `from_url`. `:splat` in `to_url` substitutes the matched portion. The tool is a string passthrough for these — they're stored verbatim and interpreted by RtD at request time.
 
+**Ordering**: RtD applies the first redirect (by `position`) whose `from` matches the request — strict first-match, not specificity-based. To make a specific rule override a catch-all wildcard, the specific rule must have a lower `position`. Our `dump` / `parse` / `apply` pipeline preserves position byte-for-byte; `diff.py` flags position-only changes as `reorder` and runs them in a final pass.
+
+**Inactive versions and slug renames**: deactivating a version on RtD deletes its artifacts and serves 404 for its URLs. Slug renames have the same effect on old-slug URLs. Because `force: false` is the default and redirects fire on 404, both events automatically route the affected URLs through any matching wildcard or page redirect. This is a feature, not a bug — designers can defer "what happens to legacy version URLs" until they're ready to deactivate.
+
+**Chains**: RtD doesn't promise server-side chain resolution. If `/a → /b` and `/b → /c` are configured, the browser follows both 3xx responses. Author each `from` pointing at the *final* `to`. RtD's infinite-redirect detector returns 404 as a failsafe but isn't a substitute for clean authoring. A future `audit` mode could detect chains; see deferred work.
+
 ### Preferred pattern for IA-cleanup redirects: `page` + `force: false` + `*`/`:splat`
 
 RtD's `force` field defaults to `false`, which means **a redirect fires only when the source URL would otherwise 404**. Combined with `page` (applies across all versions on RtD's side) and a suffix wildcard, this yields a single rule that automatically does the right thing across every version:
@@ -131,6 +137,13 @@ Captured here so it doesn't get lost. Listed in rough priority order.
    - Use live version list (same lift as the pattern-identifier feature).
    Pre-requisite if `docs.ray.io` ever drops `/en`. Note: the *migration* from `/en/...` to `/...` can be done today with a single suffix-wildcard exact redirect (`/en/*` → `/:splat`); the deferred work is ongoing YAML authoring AFTER the prefix is gone.
 1. **Wildcard `*` placement validation** — RtD only accepts suffix wildcards. We pass URL strings through without checking; an infix or prefix `*` (e.g. `/foo/*/bar`) would be rejected by the API at apply time with a clearer error than we could give. Could add a parse-time check, but the cost/benefit is marginal — agents writing redirects rarely make this mistake, and RtD's error is informative.
+1. **Ordering / chain validator** — a new `audit` mode (or a separate `lint` / `validate` subcommand) that catches authoring mistakes RtD won't flag until apply time:
+   - **Specificity-vs-position**: when rule A's `from` is a strict subset of rule B's `from` (e.g., A is `/foo/bar/*` and B is `/foo/*`), require A.position < B.position. The general catch-all must come *after* the specific override.
+   - **Chains**: detect when rule A's `to` matches rule B's `from` — a request hitting A would get a 3xx to A.to, then another 3xx for B. Recommend rewriting A to point directly at B.to.
+   - **Unreachable rules**: a later rule whose `from` is a subset of an earlier rule's `from` can never fire. Flag for removal.
+   - **Cycles**: A.to → B.from, B.to → A.from — guaranteed infinite loop at request time. RtD's failsafe returns 404 but we should reject at parse time.
+
+   Implementation sketch: a `validate(redirects: RedirectSet) -> list[Finding]` function in a new `validate.py` module, called by `audit` and optionally by `plan` / `apply` with a `--strict` flag. The CLI surface would be `rtd-redirects audit --validate-order` or similar; default behavior unchanged.
 1. **Source-file + line tracking on `Redirect`** — design.md asks `apply` to log per-entry with "source YAML file and line number". Currently `apply` only logs the URL. Adding requires `source_file: Path | None` and `source_line: int | None` fields on `Redirect` (with `compare=False`), populated by `parse` and `expand`, surfaced by `apply` log lines.
 1. **Flask integration test fixture** — design.md mentions a `pytest` fixture with a Flask server that models the v3 API. Currently we only have unit tests with mocks. Worth adding once a real apply hits an edge the mocks didn't cover.
 1. **`apply --no-delete`** — design.md mentions a flag that skips destructive operations and applies only adds/updates. Useful for cautious first runs.
