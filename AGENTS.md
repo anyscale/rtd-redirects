@@ -62,6 +62,17 @@ RtD's current v3 API supports exactly four redirect types. Our `model.REDIRECT_T
 
 **Wildcards**: `*` is allowed only as a *suffix* in `from_url`. `:splat` in `to_url` substitutes the matched portion. The tool is a string passthrough for these — they're stored verbatim and interpreted by RtD at request time.
 
+### Preferred pattern for IA-cleanup redirects: `page` + `force: false` + `*`/`:splat`
+
+RtD's `force` field defaults to `false`, which means **a redirect fires only when the source URL would otherwise 404**. Combined with `page` (applies across all versions on RtD's side) and a suffix wildcard, this yields a single rule that automatically does the right thing across every version:
+
+- On versions where the source still exists (legacy archives), the redirect is silent and the original page renders.
+- On versions where the source was moved or deleted (the version that motivated the rename), the redirect fires.
+
+Agents authoring redirects should reach for this pattern first. It avoids enumerating versions, doesn't need to be re-evaluated when new versions are cut, and preserves legacy correctness automatically. Example: `from: /api/old_module/*, to: /api/new_module/:splat, type: page` (force omitted, defaults to false).
+
+Reserve `exact` redirects for cases where you specifically need version-targeted behavior — e.g., a legacy-cohort cutover that should redirect *only* on the legacy versions. Reserve `force: true` for cases where you want to take over an existing path.
+
 **Removed from older designs**: `prefix`, `sphinx_html`, and `sphinx_htmldir` (legacy type names in `design.md`). RtD's current API doesn't accept these — wildcards replaced `prefix`, and `clean_url_to_html` / `html_to_clean_url` replaced the Sphinx-builder transitions.
 
 ## Conventions

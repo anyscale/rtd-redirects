@@ -233,6 +233,33 @@ redirects:
   - type: html_to_clean_url     # turn /page.html into /page/
 ```
 
+### Robust fan-out: `page` + `force: false` + `*`/`:splat`
+
+RtD's redirect rules default to `force: false`, which means **a redirect only fires when the source URL would otherwise 404**. Combined with `page` (applies across all versions) and a suffix wildcard, you get a single rule that does the right thing on every version without having to enumerate which versions it applies to.
+
+Concrete example — auto-generated API module renamed from `old_module` to `new_module` in current docs, but the old name still exists in legacy version archives that you don't want to rebuild:
+
+```yaml
+schema_version: 1
+redirects:
+  - from: /api/old_module/*
+    to:   /api/new_module/:splat
+    type: page
+    # force defaults to false: redirect fires only where /api/old_module/... 404s.
+```
+
+What happens at request time:
+
+| Version | `/api/old_module/foo.html` exists? | Behavior |
+|---|---|---|
+| `latest` (after rename) | no | redirect fires → `/api/new_module/foo.html` |
+| `v2.55` (rename hasn't happened) | yes | no redirect, original page renders |
+| `releases-2.40.0` (legacy) | yes | no redirect, frozen archive intact |
+
+One rule, applied semantically — newer versions get the redirect, older versions keep working. Authoring this with `force: true` or per-version `exact` rules would break legacy renders or require N rules across versions.
+
+Use `force: true` only when you specifically want to override an existing page — e.g., taking over a path that still exists in current docs but should now point elsewhere. Default `force: false` is almost always what you want for IA cleanup.
+
 ### Custom language prefix
 
 The URL language segment is configurable per file. Default is `/en`.
