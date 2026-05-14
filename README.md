@@ -97,11 +97,30 @@ Operations run in order: deletes → adds → updates → reorders. Each emits a
 
 ### `audit`
 
-Report drift between your YAML and the RtD project. Exits non-zero on drift so CI can surface it.
+Report drift between your YAML and the RtD project, plus ordering / chain validation findings. Exits non-zero on either drift or validation errors so CI can surface them.
 
 ```bash
 rtd-redirects audit --project anyscale-ray --file doc/redirects/current.yaml
 ```
+
+### Validation (`--strict` on `plan` / `apply`, always on `audit`)
+
+The tool can deterministically check that your rules are ordered correctly — most specific first, no unreachable rules, no client-side chains. Useful as the redirect set grows past a few dozen entries.
+
+```bash
+# Dry-check ordering during plan
+rtd-redirects plan --project anyscale-ray --file doc/redirects/current.yaml --strict
+
+# Refuse to apply if ordering errors exist
+rtd-redirects apply --project anyscale-ray --file doc/redirects/current.yaml --strict --yes
+```
+
+Two finding kinds:
+
+- **`ERROR ordering`** — rule A's match set is a strict subset of rule B's, but A's position is higher. B fires first; A is unreachable. Lower A's position so it comes before B.
+- **`WARNING chain`** — rule A's `to` could match rule B's `from`. A request would 3xx to A.to and the browser would follow to B for another 3xx. Rewrite A's `to` to point directly at B's `to`.
+
+Validation is rules-based and decidable in closed form because RtD's pattern surface is intentionally narrow (suffix `*` only, four redirect types, no embedded wildcards). URL-style types (`clean_url_to_html` / `html_to_clean_url`) are excluded since they have no `from` URL to compare.
 
 ## YAML schema
 
