@@ -22,7 +22,7 @@ from typing import Any
 
 import requests
 
-from rtd_redirects.model import Redirect
+from rtd_redirects.model import URL_STYLE_TYPES, Redirect
 
 LOG = logging.getLogger(__name__)
 
@@ -213,10 +213,14 @@ class RtdClient:
 
 
 def _to_api(r: Redirect) -> dict[str, Any]:
-    """Serialize a Redirect to the RtD v3 request body shape."""
-    return {
-        "from_url": r.from_url,
-        "to_url": r.to_url,
+    """Serialize a Redirect to the RtD v3 request body shape.
+
+    URL-style types (``clean_url_to_html`` / ``html_to_clean_url``) describe
+    project-wide URL transitions and don't require ``from_url`` / ``to_url``.
+    Empty values for those types are omitted from the body so the API doesn't
+    record a spurious empty path.
+    """
+    body: dict[str, Any] = {
         "type": r.type,
         "http_status": r.http_status,
         "force": r.force,
@@ -224,13 +228,26 @@ def _to_api(r: Redirect) -> dict[str, Any]:
         "position": r.position,
         "description": r.description,
     }
+    if r.type in URL_STYLE_TYPES:
+        if r.from_url:
+            body["from_url"] = r.from_url
+        if r.to_url:
+            body["to_url"] = r.to_url
+    else:
+        body["from_url"] = r.from_url
+        body["to_url"] = r.to_url
+    return body
 
 
 def _from_api(d: dict[str, Any]) -> Redirect:
-    """Build a Redirect from a single RtD v3 response object."""
+    """Build a Redirect from a single RtD v3 response object.
+
+    ``from_url`` and ``to_url`` may be absent on URL-style types; default to
+    empty string so the model stays str-typed throughout.
+    """
     return Redirect(
-        from_url=d["from_url"],
-        to_url=d["to_url"],
+        from_url=d.get("from_url") or "",
+        to_url=d.get("to_url") or "",
         type=d["type"],
         http_status=d.get("http_status", 301),
         force=d.get("force", False),

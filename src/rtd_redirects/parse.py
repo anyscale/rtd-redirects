@@ -25,7 +25,13 @@ import yaml
 
 from rtd_redirects.exceptions import ParseError
 from rtd_redirects.expand import DEFAULT_LANGUAGE_PREFIX, expand_entry, is_external
-from rtd_redirects.model import REDIRECT_TYPES, Redirect, RedirectSet
+from rtd_redirects.model import (
+    REDIRECT_TYPES,
+    URL_STYLE_TYPES,
+    VERSION_AGNOSTIC_TYPES,
+    Redirect,
+    RedirectSet,
+)
 
 SCHEMA_VERSION = 1
 
@@ -194,6 +200,11 @@ def _needs_expansion(
         return True
     if "versions" in entry:
         return True
+    type_ = entry.get("type")
+    if type_ in VERSION_AGNOSTIC_TYPES:
+        # Page / clean URL types apply across versions on RtD's side; don't
+        # fan them out across defaults.versions.
+        return False
     from_value = entry.get("from")
     if (
         defaults_versions is not None
@@ -205,17 +216,7 @@ def _needs_expansion(
 
 
 def _parse_canonical(ctx: _Ctx, entry: dict[str, Any]) -> Redirect:
-    _require_str(ctx, entry, "from")
-    _require_str(ctx, entry, "to")
     _require_str(ctx, entry, "type")
-
-    if is_external(entry["from"]):
-        raise ParseError(
-            f"{ctx.file}: redirects[{ctx.index}]: 'from' must be a project path, "
-            f"not an external URL ({entry['from']!r}); RtD only redirects from "
-            "paths the project serves"
-        )
-
     type_ = entry["type"]
     if type_ not in REDIRECT_TYPES:
         raise ParseError(
@@ -223,10 +224,36 @@ def _parse_canonical(ctx: _Ctx, entry: dict[str, Any]) -> Redirect:
             f"expected one of {sorted(REDIRECT_TYPES)}"
         )
 
+    # URL-style types describe project-wide transitions on RtD's side and
+    # don't require from_url / to_url.
+    if type_ in URL_STYLE_TYPES:
+        from_value = entry.get("from", "")
+        to_value = entry.get("to", "")
+        if from_value and not isinstance(from_value, str):
+            raise ParseError(
+                f"{ctx.file}: redirects[{ctx.index}]: 'from' must be a string"
+            )
+        if to_value and not isinstance(to_value, str):
+            raise ParseError(
+                f"{ctx.file}: redirects[{ctx.index}]: 'to' must be a string"
+            )
+    else:
+        _require_str(ctx, entry, "from")
+        _require_str(ctx, entry, "to")
+        from_value = entry["from"]
+        to_value = entry["to"]
+
+    if from_value and is_external(from_value):
+        raise ParseError(
+            f"{ctx.file}: redirects[{ctx.index}]: 'from' must be a project path, "
+            f"not an external URL ({from_value!r}); RtD only redirects from "
+            "paths the project serves"
+        )
+
     try:
         return Redirect(
-            from_url=entry["from"],
-            to_url=entry["to"],
+            from_url=from_value,
+            to_url=to_value,
             type=type_,
             http_status=entry.get("status", 301),
             force=entry.get("force", False),

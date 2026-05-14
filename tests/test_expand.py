@@ -468,6 +468,96 @@ class TestSlashHandling:
         assert records[0].to_url == "/en/v2.55/api/v3/other.html"
 
 
+class TestVersionAgnosticTypes:
+    """page / clean_url_to_html / html_to_clean_url apply across versions on RtD's side."""
+
+    def test_page_with_defaults_versions_does_not_expand(self):
+        records = _expand(
+            {"from": "/old.html", "to": "/new.html", "type": "page"},
+            defaults_versions=["latest", "master"],
+        )
+        # No fan-out: one record, path-only.
+        assert len(records) == 1
+        assert records[0].from_url == "/old.html"
+        assert records[0].to_url == "/new.html"
+
+    def test_page_versions_key_rejected(self):
+        with pytest.raises(ParseError, match="'versions:' is not supported on type"):
+            _expand(
+                {
+                    "from": "/old.html", "to": "/new.html",
+                    "type": "page", "versions": ["latest"],
+                },
+            )
+
+    def test_page_multi_source_no_versions(self):
+        records = _expand(
+            {
+                "from": ["/old1.html", "/old2.html"],
+                "to": "/new.html",
+                "type": "page",
+            },
+        )
+        assert len(records) == 2
+        assert {r.from_url for r in records} == {"/old1.html", "/old2.html"}
+        for r in records:
+            assert r.to_url == "/new.html"
+
+    @pytest.mark.parametrize("type_name", ["clean_url_to_html", "html_to_clean_url"])
+    def test_url_style_types_no_fields_required(self, type_name: str):
+        """URL-style types describe project-wide transitions; from/to optional."""
+        records = _expand({"type": type_name})
+        assert len(records) == 1
+        assert records[0].type == type_name
+        assert records[0].from_url == ""
+        assert records[0].to_url == ""
+
+    @pytest.mark.parametrize("type_name", ["clean_url_to_html", "html_to_clean_url"])
+    def test_url_style_types_ignore_defaults_versions(self, type_name: str):
+        records = _expand({"type": type_name}, defaults_versions=["latest", "master"])
+        assert len(records) == 1
+
+
+class TestWildcards:
+    """Suffix * and :splat pass through unchanged to RtD."""
+
+    def test_suffix_wildcard_passes_through(self):
+        records = _expand(
+            {
+                "from": "/en/releases-2.40.0/*",
+                "to":   "/en/latest/:splat",
+                "type": "exact",
+            },
+        )
+        assert records[0].from_url == "/en/releases-2.40.0/*"
+        assert records[0].to_url == "/en/latest/:splat"
+
+    def test_wildcard_with_version_expansion(self):
+        records = _expand(
+            {
+                "from": "/rllib/rllib/*",
+                "to":   "/rllib/:splat",
+                "type": "exact",
+                "versions": ["latest", "master"],
+            },
+        )
+        assert {r.from_url for r in records} == {
+            "/en/latest/rllib/rllib/*",
+            "/en/master/rllib/rllib/*",
+        }
+        assert {r.to_url for r in records} == {
+            "/en/latest/rllib/:splat",
+            "/en/master/rllib/:splat",
+        }
+
+    def test_wildcard_in_page_redirect(self):
+        records = _expand(
+            {"from": "/api/*", "to": "/api/v1/:splat", "type": "page"},
+        )
+        assert records[0].from_url == "/api/*"
+        assert records[0].to_url == "/api/v1/:splat"
+
+
 class TestErrorContext:
     def test_error_includes_file_and_index(self):
         with pytest.raises(ParseError, match=r"test\.yaml.*redirects\[0\]"):

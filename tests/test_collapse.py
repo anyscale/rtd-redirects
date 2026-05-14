@@ -204,6 +204,39 @@ class TestRoundTrip:
         result = self._round_trip(tmp_path, original)
         assert result == RedirectSet(original)
 
+    def test_wildcard_round_trip(self, tmp_path: Path):
+        """`*` in from and `:splat` in to pass through dump -> parse cleanly."""
+        original = [
+            _r(
+                "/en/latest/rllib/rllib/*",
+                "/en/latest/rllib/:splat",
+                position=0,
+            ),
+            _r(
+                "/en/latest/api/old/*",
+                "/en/latest/api/v2/:splat",
+                position=1,
+            ),
+        ]
+        result = self._round_trip(tmp_path, original)
+        assert result == RedirectSet(original)
+
+    def test_page_redirect_round_trip(self, tmp_path: Path):
+        """page-type records dump/parse cleanly without version fan-out."""
+        original = [_r("/old.html", "/new.html", type="page", position=0)]
+        result = self._round_trip(tmp_path, original)
+        assert result == RedirectSet(original)
+
+    def test_url_style_redirect_round_trip(self, tmp_path: Path):
+        """clean_url_to_html with empty from/to round-trips."""
+        original = [Redirect(
+            from_url="", to_url="",
+            type="clean_url_to_html",
+            position=0,
+        )]
+        result = self._round_trip(tmp_path, original)
+        assert result == RedirectSet(original)
+
     def test_mixed_groups_round_trip(self, tmp_path: Path):
         original = [
             _r("/en/latest/a.html", "/en/latest/x.html", position=0),

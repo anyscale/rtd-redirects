@@ -187,6 +187,120 @@ redirects:
 
 `from:` must always be a project path. RtD only intercepts requests for paths it serves; external `from` URLs are rejected at parse time.
 
+### Wildcards (`*` and `:splat`)
+
+RtD supports a single suffix wildcard `*` in `from_url`, with `:splat` in `to_url` substituting the matched portion. Prefix and infix wildcards are not supported by RtD.
+
+```yaml
+schema_version: 1
+redirects:
+  # Bulk redirect every page under one prefix to the same path under another.
+  - from: /en/releases-2.40.0/*
+    to:   /en/latest/:splat
+    type: exact
+
+  # Combine with version expansion: one rule × N versions.
+  - from: /rllib/rllib/*
+    to:   /rllib/:splat
+    type: exact
+    versions: [latest, master]
+```
+
+The tool is a string passthrough for URL fields — `*` and `:splat` are stored as-is and interpreted by RtD at request time. Useful for the cohort cutover (legacy version slug → current) and prefix-collapse renames.
+
+### `page` redirects apply across all versions automatically
+
+A `page` redirect with `from: /old.html, to: /new.html` triggers on `/en/latest/old.html`, `/en/master/old.html`, every legacy version — **RtD handles the fan-out itself**. Don't pair `page` with `versions:` or `defaults.versions`; the tool ignores `defaults.versions` for `page` entries, and an explicit `versions:` raises a parse error.
+
+```yaml
+schema_version: 1
+defaults:
+  versions: [latest, master]   # applies only to `exact` entries below
+redirects:
+  - from: /old.html             # page: ignores defaults.versions
+    to:   /new.html
+    type: page
+  - from: /api.html             # exact: fans out to latest and master
+    to:   /api-v2.html
+    type: exact
+```
+
+Same applies to `clean_url_to_html` and `html_to_clean_url` — these describe project-wide URL transitions and don't need `from:` or `to:` at all.
+
+```yaml
+schema_version: 1
+redirects:
+  - type: html_to_clean_url     # turn /page.html into /page/
+```
+
+### Rule ordering: specific before general
+
+RtD picks the first redirect whose `from` matches the request URL — **position-based first-match, not specificity-based**. To make a specific rule override a catch-all wildcard, give the specific rule a lower `position` (or just write it earlier in the YAML; `position` defaults to entry index).
+
+```yaml
+schema_version: 1
+redirects:
+  # Specific override fires first (position 0).
+  - from: /en/releases-2.40.0/api/special_case.html
+    to:   /en/latest/api/its_new_home.html
+    type: exact
+
+  # Catch-all wildcard fires for everything else under that version (position 1).
+  - from: /en/releases-2.40.0/*
+    to:   /en/latest/:splat
+    type: exact
+```
+
+The tool preserves ordering across `dump` / `parse` / `apply`. `diff` flags position-only changes as `reorder` and runs them in a separate pass at apply time so positions settle without churning the data phase.
+
+### Inactive versions and slug renames
+
+When you mark a version inactive on RtD, its artifacts are deleted and its URLs start returning 404. Combined with `force: false` (redirects fire on 404), this means **deactivating a version automatically routes its URLs through any matching redirect rule**. Your wildcard catch-all picks up all the old paths without any extra work.
+
+Renaming a version slug has the same effect — old-slug URLs return 404, and matching wildcard rules fire. RtD's own docs suggest pairing slug renames with an `exact` wildcard:
+
+```yaml
+# After renaming releases-2.40.0 -> v2.40.0:
+- from: /en/releases-2.40.0/*
+  to:   /en/v2.40.0/:splat
+  type: exact
+```
+
+(There's a [known corner case](https://github.com/readthedocs/readthedocs.org/issues/9335) where an inactive version's HTML can linger in storage and produce an infinite-redirect loop. RtD's infinite-redirect detector returns 404 as a failsafe; worth knowing about if you see one in practice.)
+
+### Avoid chained redirects
+
+RtD doesn't promise to resolve chains server-side. If `/a → /b` and `/b → /c` are both configured, RtD serves two 3xx responses (the browser follows each hop). Write each `from` pointing **directly at the final destination** rather than relying on the chain to collapse. If you renamed `/old → /intermediate → /current` over time, the final rule should be `/old → /current` (rewrite the existing redirect, don't stack).
+
+If RtD detects an infinite loop, it returns 404 and stops trying — useful failsafe, but not a substitute for clean authoring.
+
+### Robust fan-out: `page` + `force: false` + `*`/`:splat`
+
+RtD's redirect rules default to `force: false`, which means **a redirect only fires when the source URL would otherwise 404**. Combined with `page` (applies across all versions) and a suffix wildcard, you get a single rule that does the right thing on every version without having to enumerate which versions it applies to.
+
+Concrete example — auto-generated API module renamed from `old_module` to `new_module` in current docs, but the old name still exists in legacy version archives that you don't want to rebuild:
+
+```yaml
+schema_version: 1
+redirects:
+  - from: /api/old_module/*
+    to:   /api/new_module/:splat
+    type: page
+    # force defaults to false: redirect fires only where /api/old_module/... 404s.
+```
+
+What happens at request time:
+
+| Version | `/api/old_module/foo.html` exists? | Behavior |
+|---|---|---|
+| `latest` (after rename) | no | redirect fires → `/api/new_module/foo.html` |
+| `v2.55` (rename hasn't happened) | yes | no redirect, original page renders |
+| `releases-2.40.0` (legacy) | yes | no redirect, frozen archive intact |
+
+One rule, applied semantically — newer versions get the redirect, older versions keep working. Authoring this with `force: true` or per-version `exact` rules would break legacy renders or require N rules across versions.
+
+Use `force: true` only when you specifically want to override an existing page — e.g., taking over a path that still exists in current docs but should now point elsewhere. Default `force: false` is almost always what you want for IA cleanup.
+
 ### Custom language prefix
 
 The URL language segment is configurable per file. Default is `/en`.
@@ -211,10 +325,10 @@ Languageless RtD setups (no language segment) are not yet supported — see [`AG
 | `schema_version` | n/a | required | Top-level. Currently `1`. |
 | `language_prefix` | n/a | `/en` | Top-level. URL segment between host and version. |
 | `defaults.versions` | n/a | unset | Active version list for entries that inherit. |
-| `from` | `from_url` | required for `page`/`exact`/`prefix` | String or list. Must be a project path, not external. |
-| `to` | `to_url` | required for `page`/`exact`/`prefix` | String. Can be path-only, fully-qualified, or external (`https://`, `mailto:`, etc.). |
-| `type` | `type` | required | One of `page`, `exact`, `prefix`, `sphinx_html`, `sphinx_htmldir`. |
-| `versions` | n/a (expansion input) | falls back to `defaults.versions` | List of plain version names. Pattern identifiers (globs, ranges, exclusions, macros) are not yet supported. |
+| `from` | `from_url` | required for `page` and `exact` | String or list. Must be a project path, not external. Optional for `clean_url_to_html` / `html_to_clean_url`. |
+| `to` | `to_url` | required for `page` and `exact` | String. Path-only, fully-qualified, or external (`https://`, `mailto:`, etc.). Optional for `clean_url_to_html` / `html_to_clean_url`. |
+| `type` | `type` | required | One of `page`, `exact`, `clean_url_to_html`, `html_to_clean_url`. Only `exact` uses `versions:` / `defaults.versions`; the others apply project-wide on RtD's side. |
+| `versions` | n/a (expansion input) | falls back to `defaults.versions` | List of plain version names. Pattern identifiers (globs, ranges, exclusions, macros) are not yet supported. Only valid on `type: exact`. |
 | `status` | `http_status` | `301` | 3xx code. |
 | `force` | `force` | `false` | |
 | `enabled` | `enabled` | `true` | |
