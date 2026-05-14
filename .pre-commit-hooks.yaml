@@ -1,0 +1,9 @@
+- id: rtd-redirects-validate
+  name: rtd-redirects validate
+  description: >
+    Validate redirect YAML files: catches unreachable rules
+    (specific-after-general) and chain candidates (A.to overlaps B.from).
+    Runs locally without RtD credentials.
+  entry: rtd-redirects validate
+  language: python
+  files: \.ya?ml$

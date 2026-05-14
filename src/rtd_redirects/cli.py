@@ -34,6 +34,7 @@ from rtd_redirects.diff_file import GitError, diff_file
 from rtd_redirects.exceptions import ParseError
 from rtd_redirects.model import RedirectSet
 from rtd_redirects.parse import SCHEMA_VERSION, parse_file
+from rtd_redirects.validate import Finding, fix_ordering, validate
 
 ClientFactory = Callable[[str], RtdClient]
 
@@ -43,6 +44,7 @@ EXIT_USAGE = 2
 EXIT_RTD = 3
 EXIT_GIT = 4
 EXIT_PARSE = 5
+EXIT_VALIDATION = 6
 
 
 def main(
@@ -60,6 +62,7 @@ def main(
         "diff-file": _cmd_diff_file,
         "apply": _cmd_apply,
         "audit": _cmd_audit,
+        "validate": _cmd_validate,
     }
 
     try:
@@ -109,6 +112,10 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_plan.add_argument("--project", "-p", default=None, help=project_help)
     p_plan.add_argument("--file", "-f", required=True, help=file_help)
+    p_plan.add_argument(
+        "--strict", action="store_true",
+        help="Run the order / chain validator and exit non-zero on any error finding.",
+    )
 
     p_diff = subparsers.add_parser(
         "diff-file", help="Show the diff between two git refs of a YAML file.",
@@ -136,12 +143,31 @@ def _build_parser() -> argparse.ArgumentParser:
         "--yes", "-y", action="store_true",
         help="Skip interactive confirmation. Required in non-interactive contexts.",
     )
+    p_apply.add_argument(
+        "--strict", action="store_true",
+        help="Run the order / chain validator and refuse to apply on any error finding.",
+    )
 
     p_audit = subparsers.add_parser(
         "audit", help="Report drift between a YAML file and the RtD project.",
     )
     p_audit.add_argument("--project", "-p", default=None, help=project_help)
     p_audit.add_argument("--file", "-f", required=True, help=file_help)
+
+    p_validate = subparsers.add_parser(
+        "validate",
+        help="Validate ordering and chain risks in one or more YAML files. "
+             "Requires no RtD credentials; usable from pre-commit and local agents.",
+    )
+    p_validate.add_argument(
+        "files", nargs="+",
+        help="YAML file(s) to validate.",
+    )
+    p_validate.add_argument(
+        "--fix", action="store_true",
+        help="Reorder rules deterministically to satisfy subset constraints and "
+             "rewrite the file(s) in place. Chain warnings are not auto-fixed.",
+    )
 
     return parser
 
@@ -185,6 +211,13 @@ def _cmd_plan(args: argparse.Namespace, *, client_factory: ClientFactory) -> int
     _print_diff(d)
     if d.is_empty:
         print("plan: no changes", file=sys.stderr)
+
+    if args.strict:
+        findings = validate(source)
+        _print_findings(findings, file=sys.stderr)
+        if any(f.severity == "error" for f in findings):
+            return EXIT_VALIDATION
+
     return EXIT_OK
 
 
@@ -201,6 +234,18 @@ def _cmd_diff_file(args: argparse.Namespace, *, client_factory: ClientFactory) -
 
 def _cmd_apply(args: argparse.Namespace, *, client_factory: ClientFactory) -> int:
     source = parse_file(Path(args.file))
+
+    if args.strict:
+        findings = validate(source)
+        _print_findings(findings, file=sys.stderr)
+        if any(f.severity == "error" for f in findings):
+            print(
+                "apply: refusing to apply with validation errors "
+                "(re-run without --strict to override)",
+                file=sys.stderr,
+            )
+            return EXIT_VALIDATION
+
     client = client_factory(_resolve_project(args))
     target = RedirectSet(client.list_redirects())
     d = diff(source, target)
@@ -232,17 +277,93 @@ def _cmd_apply(args: argparse.Namespace, *, client_factory: ClientFactory) -> in
 
 def _cmd_audit(args: argparse.Namespace, *, client_factory: ClientFactory) -> int:
     source = parse_file(Path(args.file))
+    findings = validate(source)
+
     client = client_factory(_resolve_project(args))
     target = RedirectSet(client.list_redirects())
     d = diff(source, target)
 
-    if d.is_empty:
+    if not d.is_empty:
+        print("audit: drift detected", file=sys.stderr)
+        _print_diff(d, file=sys.stderr)
+    else:
         print("audit: no drift", file=sys.stderr)
-        return EXIT_OK
 
-    print("audit: drift detected", file=sys.stderr)
-    _print_diff(d, file=sys.stderr)
-    return EXIT_DRIFT
+    if findings:
+        _print_findings(findings, file=sys.stderr)
+
+    has_errors = any(f.severity == "error" for f in findings)
+    if not d.is_empty and has_errors:
+        return EXIT_VALIDATION  # validation errors take precedence
+    if has_errors:
+        return EXIT_VALIDATION
+    if not d.is_empty:
+        return EXIT_DRIFT
+    return EXIT_OK
+
+
+def _cmd_validate(args: argparse.Namespace, *, client_factory: ClientFactory) -> int:
+    """Validate one or more YAML files. No RtD API access required."""
+    exit_code = EXIT_OK
+    for path_str in args.files:
+        path = Path(path_str)
+        source = parse_file(path)
+        findings = validate(source)
+
+        if args.fix:
+            ordering_errors = [
+                f for f in findings if f.kind == "ordering" and f.severity == "error"
+            ]
+            if ordering_errors:
+                fixed = fix_ordering(source)
+                _write_yaml(path, fixed)
+                print(
+                    f"{path}: reordered {len(ordering_errors)} unreachable rule(s); "
+                    "re-run validate to confirm",
+                    file=sys.stderr,
+                )
+                # Re-validate after fix to surface anything that remains (chains, etc.).
+                findings = validate(fixed)
+
+        if findings:
+            print(f"\n{path}:", file=sys.stderr)
+            _print_findings(findings, file=sys.stderr)
+            if any(f.severity == "error" for f in findings):
+                exit_code = EXIT_VALIDATION
+        else:
+            print(f"{path}: ok", file=sys.stderr)
+    return exit_code
+
+
+def _write_yaml(path: Path, source: RedirectSet) -> None:
+    """Rewrite a YAML file from a (possibly fixed) RedirectSet.
+
+    Reads top-level metadata (schema_version, language_prefix, defaults) from
+    the existing file so they're preserved. Loses comments and authoring
+    formatting; round-trip-safe for canonical content.
+    """
+    raw = yaml.safe_load(path.read_text()) or {}
+    new_doc: dict[str, object] = {}
+    new_doc["schema_version"] = raw.get("schema_version", SCHEMA_VERSION)
+    if "language_prefix" in raw:
+        new_doc["language_prefix"] = raw["language_prefix"]
+    if "defaults" in raw:
+        new_doc["defaults"] = raw["defaults"]
+    new_doc["redirects"] = collapse(source)
+    path.write_text(yaml.safe_dump(new_doc, sort_keys=False, default_flow_style=False))
+
+
+def _print_findings(findings: list[Finding], *, file: TextIO | None = None) -> None:
+    """Render validation findings one per line. Empty input produces no output."""
+    if file is None:
+        file = sys.stderr
+    if not findings:
+        return
+    errors = sum(1 for f in findings if f.severity == "error")
+    warnings = sum(1 for f in findings if f.severity == "warning")
+    print(f"\nvalidate: {errors} error, {warnings} warning", file=file)
+    for f in findings:
+        print(f"  {f.severity.upper()} {f.kind}: {f.message}", file=file)
 
 
 def _print_diff(d: Diff, *, file: TextIO | None = None) -> None:

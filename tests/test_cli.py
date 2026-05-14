@@ -10,7 +10,14 @@ from unittest.mock import MagicMock
 import pytest
 import yaml
 
-from rtd_redirects.cli import EXIT_DRIFT, EXIT_OK, EXIT_PARSE, EXIT_RTD, main
+from rtd_redirects.cli import (
+    EXIT_DRIFT,
+    EXIT_OK,
+    EXIT_PARSE,
+    EXIT_RTD,
+    EXIT_VALIDATION,
+    main,
+)
 from rtd_redirects.client import RtdAuthError, RtdClient
 from rtd_redirects.model import Redirect
 
@@ -323,6 +330,255 @@ class TestAudit:
         err = capsys.readouterr().err
         assert "drift detected" in err
         assert "- /drift" in err
+
+
+_UNREACHABLE_YAML = """
+schema_version: 1
+redirects:
+  - from: /api/*
+    to:   /v2/:splat
+    type: page
+  - from: /api/v1/foo.html
+    to:   /v2/foo.html
+    type: page
+"""
+
+
+class TestPlanStrict:
+    def test_strict_with_no_findings_exits_ok(
+        self, tmp_path: Path, mock_client: MagicMock, factory,
+    ):
+        _write_yaml(tmp_path / "r.yaml", """
+            schema_version: 1
+            redirects:
+              - from: /a
+                to:   /b
+                type: exact
+        """)
+        mock_client.list_redirects.return_value = [_r("/a", "/b", pk=1)]
+        rc = main(
+            ["plan", "--project", "p", "--file", str(tmp_path / "r.yaml"), "--strict"],
+            client_factory=factory,
+        )
+        assert rc == EXIT_OK
+
+    def test_strict_with_ordering_error_exits_validation(
+        self, tmp_path: Path, mock_client: MagicMock, factory,
+        capsys: pytest.CaptureFixture,
+    ):
+        _write_yaml(tmp_path / "r.yaml", _UNREACHABLE_YAML)
+        mock_client.list_redirects.return_value = []
+        rc = main(
+            ["plan", "--project", "p", "--file", str(tmp_path / "r.yaml"), "--strict"],
+            client_factory=factory,
+        )
+        assert rc == EXIT_VALIDATION
+        err = capsys.readouterr().err
+        assert "validate:" in err
+        assert "ERROR ordering" in err
+
+    def test_no_strict_skips_validation(
+        self, tmp_path: Path, mock_client: MagicMock, factory,
+    ):
+        """Without --strict, even an unreachable rule doesn't fail plan."""
+        _write_yaml(tmp_path / "r.yaml", _UNREACHABLE_YAML)
+        mock_client.list_redirects.return_value = []
+        rc = main(
+            ["plan", "--project", "p", "--file", str(tmp_path / "r.yaml")],
+            client_factory=factory,
+        )
+        assert rc == EXIT_OK
+
+
+class TestApplyStrict:
+    def test_strict_with_ordering_error_refuses_to_apply(
+        self, tmp_path: Path, mock_client: MagicMock, factory,
+        capsys: pytest.CaptureFixture,
+    ):
+        _write_yaml(tmp_path / "r.yaml", _UNREACHABLE_YAML)
+        mock_client.list_redirects.return_value = []
+        rc = main(
+            [
+                "apply", "--project", "p",
+                "--file", str(tmp_path / "r.yaml"),
+                "--strict", "--yes",
+            ],
+            client_factory=factory,
+        )
+        assert rc == EXIT_VALIDATION
+        # Must have refused before mutating
+        mock_client.create_redirect.assert_not_called()
+        assert "refusing" in capsys.readouterr().err
+
+
+class TestAuditFindings:
+    def test_clean_file_no_drift_exits_ok(
+        self, tmp_path: Path, mock_client: MagicMock, factory,
+        capsys: pytest.CaptureFixture,
+    ):
+        _write_yaml(tmp_path / "r.yaml", """
+            schema_version: 1
+            redirects:
+              - from: /a
+                to:   /b
+                type: exact
+        """)
+        mock_client.list_redirects.return_value = [_r("/a", "/b", pk=1)]
+        rc = main(
+            ["audit", "--project", "p", "--file", str(tmp_path / "r.yaml")],
+            client_factory=factory,
+        )
+        assert rc == EXIT_OK
+
+    def test_ordering_error_in_audit_exits_validation(
+        self, tmp_path: Path, mock_client: MagicMock, factory,
+        capsys: pytest.CaptureFixture,
+    ):
+        _write_yaml(tmp_path / "r.yaml", _UNREACHABLE_YAML)
+        # No drift — RtD matches the YAML — but validation still flags.
+        mock_client.list_redirects.return_value = [
+            _r("/api/*", "/v2/:splat", pk=1),
+            _r("/api/v1/foo.html", "/v2/foo.html", pk=2),
+        ]
+        # Have to adjust _r's defaults so the records actually match parsed
+        # YAML; do it inline.
+        from rtd_redirects.model import Redirect
+        mock_client.list_redirects.return_value = [
+            Redirect(
+                from_url="/api/*", to_url="/v2/:splat",
+                type="page", pk=1,
+            ),
+            Redirect(
+                from_url="/api/v1/foo.html", to_url="/v2/foo.html",
+                type="page", pk=2, position=1,
+            ),
+        ]
+        rc = main(
+            ["audit", "--project", "p", "--file", str(tmp_path / "r.yaml")],
+            client_factory=factory,
+        )
+        assert rc == EXIT_VALIDATION
+        err = capsys.readouterr().err
+        assert "validate:" in err
+
+    def test_drift_alone_exits_drift(
+        self, tmp_path: Path, mock_client: MagicMock, factory,
+        capsys: pytest.CaptureFixture,
+    ):
+        """No validation findings, but RtD differs from YAML."""
+        _write_yaml(tmp_path / "r.yaml", """
+            schema_version: 1
+            redirects:
+              - from: /a
+                to:   /b
+                type: exact
+        """)
+        # RtD has an extra record not in YAML
+        mock_client.list_redirects.return_value = [
+            _r("/a", "/b", pk=1),
+            _r("/c", "/d", pk=2),
+        ]
+        rc = main(
+            ["audit", "--project", "p", "--file", str(tmp_path / "r.yaml")],
+            client_factory=factory,
+        )
+        assert rc == EXIT_DRIFT
+
+
+class TestValidateSubcommand:
+    """`validate` is the API-free entry point for local agents and pre-commit."""
+
+    def test_clean_file_exits_ok(
+        self, tmp_path: Path, factory, capsys: pytest.CaptureFixture,
+    ):
+        f = _write_yaml(tmp_path / "r.yaml", """
+            schema_version: 1
+            redirects:
+              - from: /a
+                to:   /b
+                type: exact
+        """)
+        rc = main(["validate", str(f)], client_factory=factory)
+        assert rc == EXIT_OK
+        assert "ok" in capsys.readouterr().err
+
+    def test_unreachable_rule_flagged(
+        self, tmp_path: Path, factory, capsys: pytest.CaptureFixture,
+    ):
+        f = _write_yaml(tmp_path / "r.yaml", _UNREACHABLE_YAML)
+        rc = main(["validate", str(f)], client_factory=factory)
+        assert rc == EXIT_VALIDATION
+        err = capsys.readouterr().err
+        assert "ERROR ordering" in err
+
+    def test_multiple_files(
+        self, tmp_path: Path, factory, capsys: pytest.CaptureFixture,
+    ):
+        clean = _write_yaml(tmp_path / "clean.yaml", """
+            schema_version: 1
+            redirects:
+              - from: /a
+                to: /b
+                type: exact
+        """)
+        bad = _write_yaml(tmp_path / "bad.yaml", _UNREACHABLE_YAML)
+        rc = main(["validate", str(clean), str(bad)], client_factory=factory)
+        assert rc == EXIT_VALIDATION
+        err = capsys.readouterr().err
+        assert "clean.yaml: ok" in err
+        assert "bad.yaml" in err
+        assert "ERROR ordering" in err
+
+    def test_fix_rewrites_file_and_exits_clean(
+        self, tmp_path: Path, factory, capsys: pytest.CaptureFixture,
+    ):
+        f = _write_yaml(tmp_path / "r.yaml", _UNREACHABLE_YAML)
+        rc = main(["validate", str(f), "--fix"], client_factory=factory)
+        assert rc == EXIT_OK
+        # File now passes validation
+        rc_after = main(["validate", str(f)], client_factory=factory)
+        assert rc_after == EXIT_OK
+
+    def test_fix_preserves_top_level_metadata(
+        self, tmp_path: Path, factory,
+    ):
+        f = _write_yaml(tmp_path / "r.yaml", """
+            schema_version: 1
+            language_prefix: /en
+            defaults:
+              versions: [latest]
+            redirects:
+              - from: /api/*
+                to:   /v2/:splat
+                type: exact
+              - from: /api/v1/foo.html
+                to:   /v2/foo.html
+                type: exact
+        """)
+        rc = main(["validate", str(f), "--fix"], client_factory=factory)
+        assert rc == EXIT_OK
+        rewritten = yaml.safe_load(f.read_text())
+        assert rewritten["schema_version"] == 1
+        assert rewritten["language_prefix"] == "/en"
+        assert rewritten["defaults"]["versions"] == ["latest"]
+
+    def test_no_api_required(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ):
+        """validate must work without RTD_API_TOKEN — used by pre-commit hooks."""
+        monkeypatch.delenv("RTD_API_TOKEN", raising=False)
+        f = _write_yaml(tmp_path / "r.yaml", """
+            schema_version: 1
+            redirects:
+              - from: /a
+                to: /b
+                type: exact
+        """)
+        # Factory shouldn't even be invoked. Use a poisoned factory to prove it.
+        def poisoned(_slug):
+            raise RuntimeError("RtD client should not be constructed")
+        rc = main(["validate", str(f)], client_factory=poisoned)
+        assert rc == EXIT_OK
 
 
 class TestErrorHandling:
