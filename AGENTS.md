@@ -84,6 +84,16 @@ RtD's `force` field defaults to `false`, which means **a redirect fires only whe
 
 Agents authoring redirects should reach for this pattern first. It avoids enumerating versions, doesn't need to be re-evaluated when new versions are cut, and preserves legacy correctness automatically. Example: `from: /api/old_module/*, to: /api/new_module/:splat, type: page` (force omitted, defaults to false).
 
+**Target selection — prefer the most intent-preserving rule, fall back only as needed.** When a page or subtree moves, pick the highest tier that applies:
+
+1. **Per-page override** when an individual leaf renamed: `from: /old-name.html, to: /new-name.html`.
+1. **Splat relocation** when a subtree moved wholesale and the leaf names are preserved: `from: /api/ray-air/*, to: /api/ray-llm/:splat`. This is the preferred catch-all for a bulk move — it lands every page on its real equivalent, not a generic index.
+1. **Global catch-all** only as the backup, when pages were moved, deleted, or renamed with no clean 1:1 mapping: `from: /api/ray-air/*, to: /api/index.html`. Sends everything to the nearest surviving index.
+
+When more than one tier targets the same prefix, give the more specific rule the lower `position` so it fires first; the global catch-all goes last. `validate --fix` enforces this ordering.
+
+**Never write a same-path splat** (`from: /x/*, to: /x/:splat`): it redirects a 404'd URL to itself — a no-op loop, and exactly the rule the bootstrap cleanup deleted. "Try the same name first" needs no rule; `force: false` already renders the page when it exists.
+
 Reserve `exact` redirects for cases where you specifically need version-targeted behavior — e.g., a legacy-cohort cutover that should redirect *only* on the legacy versions. Reserve `force: true` for cases where you want to take over an existing path.
 
 **Removed from older designs**: `prefix`, `sphinx_html`, and `sphinx_htmldir` (legacy type names in `design.md`). RtD's current API doesn't accept these — wildcards replaced `prefix`, and `clean_url_to_html` / `html_to_clean_url` replaced the Sphinx-builder transitions.
