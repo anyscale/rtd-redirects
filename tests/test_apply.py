@@ -7,10 +7,12 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from rtd_redirects.apply import ApplyResult, apply
+from rtd_redirects.apply import ApplyResult, apply, apply_converging
 from rtd_redirects.client import RtdClient
-from rtd_redirects.diff import Diff, Update
-from rtd_redirects.model import Redirect
+from rtd_redirects.diff import Diff, Update, diff
+from rtd_redirects.model import Redirect, RedirectSet
+
+from ._fakes import FakeRtd, StuckRtd
 
 
 def _r(
@@ -24,6 +26,10 @@ def _r(
     return Redirect(
         from_url=from_url, to_url=to_url, type=type, position=position, pk=pk,
     )
+
+
+def _page(from_url: str, to_url: str, position: int) -> Redirect:
+    return Redirect(from_url=from_url, to_url=to_url, type="page", position=position)
 
 
 @pytest.fixture
@@ -158,3 +164,51 @@ class TestFailureBehavior:
         with pytest.raises(RuntimeError, match="boom"):
             apply(d, client, log=io.StringIO())
         client.update_redirect.assert_not_called()
+
+
+class TestConvergence:
+    """apply_converging reconciles whatever placement RtD gives new records.
+
+    The slot RtD assigns on create isn't fixed (the bulk API apply landed
+    records at the tail; the UI inserts at the top), so these tests run the
+    converging driver against several create placements and assert it always
+    reaches the source ordering. A single apply can't: its diff is computed
+    before the adds exist, so it enumerates no reorders for them.
+    """
+
+    def _source(self) -> RedirectSet:
+        # /a/sub/* (specific) must precede /a/* (general), but it sorts AFTER it
+        # by identity, so an identity-ordered add can place them out of order.
+        return RedirectSet([
+            _page("/keep", "/dest", 0),
+            _page("/a/sub/*", "/sub", 1),
+            _page("/a/*", "/general", 2),
+        ])
+
+    def test_single_apply_can_leave_a_shadowed_rule(self):
+        fake = FakeRtd(create_mode="append")
+        source = self._source()
+        # The one-shot diff has no reorders — the new records don't exist yet.
+        apply(diff(source, RedirectSet(fake.list_redirects())), fake, log=io.StringIO())
+        residual = diff(source, RedirectSet(fake.list_redirects()))
+        assert not residual.is_empty
+        order = [r.from_url for r in fake.list_redirects()]
+        assert order.index("/a/*") < order.index("/a/sub/*")  # general shadows specific
+
+    @pytest.mark.parametrize("create_mode", ["honor", "append", "prepend"])
+    def test_converges_regardless_of_create_placement(self, create_mode: str):
+        fake = FakeRtd(create_mode=create_mode)
+        source = self._source()
+        outcome = apply_converging(source, fake, log=io.StringIO())
+        assert outcome.converged
+        assert diff(source, RedirectSet(fake.list_redirects())).is_empty
+        order = [r.from_url for r in fake.list_redirects()]
+        assert order == ["/keep", "/a/sub/*", "/a/*"]
+
+    def test_reports_residual_when_it_cannot_settle(self):
+        fake = StuckRtd()
+        source = self._source()
+        outcome = apply_converging(source, fake, max_passes=3, log=io.StringIO())
+        assert not outcome.converged
+        assert outcome.passes == 3
+        assert not outcome.residual.is_empty

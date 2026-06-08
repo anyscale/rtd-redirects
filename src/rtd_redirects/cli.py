@@ -26,7 +26,7 @@ from typing import TextIO
 
 import yaml
 
-from rtd_redirects.apply import apply as apply_diff
+from rtd_redirects.apply import apply_converging
 from rtd_redirects.client import RtdAuthError, RtdClient, RtdClientError
 from rtd_redirects.collapse import collapse
 from rtd_redirects.diff import Diff, diff
@@ -266,12 +266,24 @@ def _cmd_apply(args: argparse.Namespace, *, client_factory: ClientFactory) -> in
             print("aborted", file=sys.stderr)
             return EXIT_USAGE
 
-    result = apply_diff(d, client)
+    outcome = apply_converging(source, client, log=sys.stderr)
+    result = outcome.result
+    passes_note = (
+        f" (converged in {outcome.passes} passes)" if outcome.passes > 1 else ""
+    )
     print(
         f"applied: {result.deleted} deleted, {result.added} added, "
-        f"{result.updated} updated, {result.reordered} reordered",
+        f"{result.updated} updated, {result.reordered} reordered{passes_note}",
         file=sys.stderr,
     )
+    if not outcome.converged:
+        print(
+            f"apply: live state did not converge after {outcome.passes} passes; "
+            f"{len(outcome.residual)} change(s) still differ:",
+            file=sys.stderr,
+        )
+        _print_diff(outcome.residual, file=sys.stderr)
+        return EXIT_DRIFT
     return EXIT_OK
 
 

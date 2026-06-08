@@ -127,19 +127,22 @@ class TestReorders:
         assert d.reorders[0].target.pk == 1
         assert d.reorders[0].source.position == 5
 
-    def test_multiple_reorders_sorted_by_identity(self):
+    def test_multiple_reorders_sorted_by_target_position(self):
+        # Identity order would be /a, /b, /c; the target positions invert that.
+        # Reorders must come out by ascending target position so insert-and-shift
+        # position writes settle the lowest slot first.
         t = RedirectSet([
-            _r("/c", position=0, pk=3),
-            _r("/a", position=1, pk=1),
-            _r("/b", position=2, pk=2),
+            _r("/a", position=0, pk=1),
+            _r("/b", position=1, pk=2),
+            _r("/c", position=2, pk=3),
         ])
         s = RedirectSet([
-            _r("/c", position=2),
-            _r("/a", position=0),
-            _r("/b", position=1),
+            _r("/a", position=1),
+            _r("/b", position=2),
+            _r("/c", position=0),
         ])
         d = diff(s, t)
-        assert [u.source.from_url for u in d.reorders] == ["/a", "/b", "/c"]
+        assert [u.source.from_url for u in d.reorders] == ["/c", "/a", "/b"]
 
 
 class TestMixed:
