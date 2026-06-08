@@ -21,6 +21,8 @@ from rtd_redirects.cli import (
 from rtd_redirects.client import RtdAuthError, RtdClient
 from rtd_redirects.model import Redirect
 
+from ._fakes import FakeRtd, StuckRtd
+
 
 def _r(from_url: str, to_url: str = "/dest", *, pk: int | None = None) -> Redirect:
     return Redirect(from_url=from_url, to_url=to_url, type="exact", pk=pk)
@@ -202,8 +204,7 @@ class TestApply:
         mock_client.create_redirect.assert_not_called()
 
     def test_yes_flag_skips_confirmation_and_applies(
-        self, tmp_path: Path, mock_client: MagicMock, factory,
-        capsys: pytest.CaptureFixture,
+        self, tmp_path: Path, capsys: pytest.CaptureFixture,
     ):
         _write_yaml(tmp_path / "r.yaml", """
             schema_version: 1
@@ -212,18 +213,17 @@ class TestApply:
                 to:   /b
                 type: exact
         """)
-        mock_client.list_redirects.return_value = []  # nothing in RtD; add /a
+        fake = FakeRtd()  # nothing in RtD; apply must add /a and converge
         rc = main(
             ["apply", "--project", "p", "--file", str(tmp_path / "r.yaml"), "--yes"],
-            client_factory=factory,
+            client_factory=lambda _project: fake,
         )
         assert rc == EXIT_OK
-        mock_client.create_redirect.assert_called_once()
+        assert [r.from_url for r in fake.list_redirects()] == ["/a"]
         assert "applied: 0 deleted, 1 added" in capsys.readouterr().err
 
     def test_interactive_yes_applies(
-        self, tmp_path: Path, mock_client: MagicMock, factory,
-        monkeypatch: pytest.MonkeyPatch,
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ):
         _write_yaml(tmp_path / "r.yaml", """
             schema_version: 1
@@ -232,14 +232,38 @@ class TestApply:
                 to:   /b
                 type: exact
         """)
-        mock_client.list_redirects.return_value = []
+        fake = FakeRtd()
         monkeypatch.setattr("builtins.input", lambda _: "y")
         rc = main(
             ["apply", "--project", "p", "--file", str(tmp_path / "r.yaml")],
-            client_factory=factory,
+            client_factory=lambda _project: fake,
         )
         assert rc == EXIT_OK
-        mock_client.create_redirect.assert_called_once()
+        assert [r.from_url for r in fake.list_redirects()] == ["/a"]
+
+    def test_reports_drift_when_apply_cannot_converge(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture,
+    ):
+        # Adds land but reorders never settle (StuckRtd), so the more-specific
+        # rule can't be lifted above the catch-all: apply must report drift
+        # rather than claim success on a shadowed ordering.
+        _write_yaml(tmp_path / "r.yaml", """
+            schema_version: 1
+            redirects:
+              - from: /a/sub/*
+                to:   /sub
+                type: page
+              - from: /a/*
+                to:   /general
+                type: page
+        """)
+        fake = StuckRtd()
+        rc = main(
+            ["apply", "--project", "p", "--file", str(tmp_path / "r.yaml"), "--yes"],
+            client_factory=lambda _project: fake,
+        )
+        assert rc == EXIT_DRIFT
+        assert "did not converge" in capsys.readouterr().err
 
     def test_interactive_no_aborts(
         self, tmp_path: Path, mock_client: MagicMock, factory,

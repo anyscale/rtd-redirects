@@ -7,10 +7,12 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from rtd_redirects.apply import ApplyResult, apply
+from rtd_redirects.apply import ApplyResult, apply, apply_converging
 from rtd_redirects.client import RtdClient
-from rtd_redirects.diff import Diff, Update
-from rtd_redirects.model import Redirect
+from rtd_redirects.diff import Diff, Update, diff
+from rtd_redirects.model import Redirect, RedirectSet
+
+from ._fakes import FakeRtd, StuckRtd
 
 
 def _r(
@@ -24,6 +26,10 @@ def _r(
     return Redirect(
         from_url=from_url, to_url=to_url, type=type, position=position, pk=pk,
     )
+
+
+def _page(from_url: str, to_url: str, position: int) -> Redirect:
+    return Redirect(from_url=from_url, to_url=to_url, type="page", position=position)
 
 
 @pytest.fixture
@@ -158,3 +164,50 @@ class TestFailureBehavior:
         with pytest.raises(RuntimeError, match="boom"):
             apply(d, client, log=io.StringIO())
         client.update_redirect.assert_not_called()
+
+
+class TestConvergence:
+    """apply_converging reconciles RtD's insert-and-shift placement.
+
+    FakeRtd models the observed RtD behavior: new records land at the tail
+    rather than their requested position, and position writes insert-and-shift.
+    A single apply pass therefore leaves added records out of order; the
+    converging driver re-diffs and re-applies until the live state matches.
+    """
+
+    def _source(self) -> RedirectSet:
+        # The specific rule must precede the general one, but it sorts AFTER it
+        # by identity ("/ray-air/*" < "/ray-air/examples/*"), so an identity-
+        # ordered add places the two in the wrong relative order.
+        return RedirectSet([
+            _page("/keep", "/dest", 0),
+            _page("/ray-air/examples/*", "/examples", 1),
+            _page("/ray-air/*", "/air", 2),
+        ])
+
+    def test_single_apply_leaves_new_records_out_of_order(self):
+        fake = FakeRtd([_page("/keep", "/dest", 0)])
+        source = self._source()
+        # The one-shot diff has no reorders — the new records don't exist yet.
+        apply(diff(source, RedirectSet(fake.list_redirects())), fake, log=io.StringIO())
+        residual = diff(source, RedirectSet(fake.list_redirects()))
+        assert not residual.is_empty
+        order = [r.from_url for r in fake.list_redirects()]
+        assert order.index("/ray-air/*") < order.index("/ray-air/examples/*")
+
+    def test_apply_converging_reaches_zero_drift_and_correct_order(self):
+        fake = FakeRtd([_page("/keep", "/dest", 0)])
+        source = self._source()
+        outcome = apply_converging(source, fake, log=io.StringIO())
+        assert outcome.converged
+        assert diff(source, RedirectSet(fake.list_redirects())).is_empty
+        order = [r.from_url for r in fake.list_redirects()]
+        assert order == ["/keep", "/ray-air/examples/*", "/ray-air/*"]
+
+    def test_reports_residual_when_it_cannot_settle(self):
+        fake = StuckRtd([_page("/keep", "/dest", 0)])
+        source = self._source()
+        outcome = apply_converging(source, fake, max_passes=3, log=io.StringIO())
+        assert not outcome.converged
+        assert outcome.passes == 3
+        assert not outcome.residual.is_empty

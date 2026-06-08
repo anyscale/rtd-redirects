@@ -83,7 +83,12 @@ def diff(source: RedirectSet, target: RedirectSet) -> Diff:
     adds.sort(key=lambda r: r.identity)
     deletes.sort(key=lambda r: r.identity)
     updates.sort(key=lambda u: u.source.identity)
-    reorders.sort(key=lambda u: u.source.identity)
+    # Order reorders by ascending target position (identity breaks ties for
+    # determinism). RtD rewrites positions with insert-and-shift semantics, so
+    # settling the lowest slot first lets each write land without disturbing
+    # already-placed lower slots; sorting by identity can leave a multi-record
+    # batch unconverged after a single pass.
+    reorders.sort(key=lambda u: (u.source.position, u.source.identity))
 
     return Diff(adds=adds, updates=updates, deletes=deletes, reorders=reorders)
 
