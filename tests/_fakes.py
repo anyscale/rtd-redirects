@@ -3,19 +3,26 @@
 RtD assigns and rewrites redirect positions with insert-and-shift behavior:
 creating or moving a record renumbers the rest into a contiguous ``0..N-1``
 sequence. A plain ``MagicMock`` can't capture that, but the convergence
-behavior of :func:`rtd_redirects.apply.apply_converging` depends on it, so
-tests that exercise multi-record ordering use these fakes instead.
+behavior of :func:`rtd_redirects.apply.apply_converging` depends on it.
 
-Deliberate fidelity choices, matching what a real bulk apply did on the live
-``anyscale-ray`` project:
+The slot RtD gives a *newly created* record isn't pinned down. ``_to_api``
+sends ``position`` on create, and the dashboard inserts new redirects at the
+top by default — so position is honorable on create, but the effective default
+varies. The bulk API apply against ``anyscale-ray`` left new records at the
+tail, which is what ``"honor"`` mode reproduces: a batch whose target positions
+sit past the current end clamps to the end and degenerates to tail-append.
 
-- ``create_redirect`` appends. New records land at the tail rather than at
-  their requested ``position`` — the condition that makes a single ``apply``
-  pass leave added records out of order.
-- ``update_redirect`` with a changed ``position`` removes the record and
-  re-inserts it at the requested slot (clamped to the current length),
-  shifting the rest.
-- ``list_redirects`` returns copies whose ``position`` is the current index.
+``create_mode`` lets a test pick a placement so the suite can prove the
+converging driver reconciles the live state regardless of where creates land:
+
+- ``"honor"`` (default): insert at the requested ``position`` (clamped to the
+  current length), shifting the rest.
+- ``"append"``: new records always land at the tail.
+- ``"prepend"``: new records always land at position 0 (the UI default).
+
+``update_redirect`` always honors the requested position (clamped) with
+insert-and-shift. ``list_redirects`` returns copies whose ``position`` is the
+current index.
 """
 
 from __future__ import annotations
@@ -28,7 +35,10 @@ from rtd_redirects.model import Redirect
 class FakeRtd:
     """Stateful stand-in for ``RtdClient`` over an ordered list of records."""
 
-    def __init__(self, initial: list[Redirect] | None = None) -> None:
+    def __init__(
+        self, initial: list[Redirect] | None = None, *, create_mode: str = "honor"
+    ) -> None:
+        self.create_mode = create_mode
         self._records: list[Redirect] = []
         self._next_pk = 1000
         for r in initial or []:
@@ -42,10 +52,18 @@ class FakeRtd:
     def list_redirects(self) -> list[Redirect]:
         return [replace(r, position=i) for i, r in enumerate(self._records)]
 
+    def _create_slot(self, requested: int) -> int:
+        if self.create_mode == "append":
+            return len(self._records)
+        if self.create_mode == "prepend":
+            return 0
+        return min(requested, len(self._records))
+
     def create_redirect(self, r: Redirect) -> Redirect:
         created = replace(r, pk=self._new_pk())
-        self._records.append(created)  # RtD lands new records at the tail
-        return replace(created, position=len(self._records) - 1)
+        slot = self._create_slot(r.position)
+        self._records.insert(slot, created)
+        return replace(created, position=slot)
 
     def update_redirect(self, pk: int, r: Redirect) -> Redirect:
         idx = next(i for i, x in enumerate(self._records) if x.pk == pk)
@@ -64,8 +82,12 @@ class StuckRtd(FakeRtd):
 
     Models a client that can't converge, so tests can verify the driver stops
     after ``max_passes`` and reports the residual instead of looping forever or
-    claiming success.
+    claiming success. Creates append (so the added records start out of order
+    and reorders are needed), but those reorders are no-ops.
     """
+
+    def __init__(self, initial: list[Redirect] | None = None) -> None:
+        super().__init__(initial, create_mode="append")
 
     def update_redirect(self, pk: int, r: Redirect) -> Redirect:
         idx = next(i for i, x in enumerate(self._records) if x.pk == pk)

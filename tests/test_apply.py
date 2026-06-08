@@ -167,45 +167,46 @@ class TestFailureBehavior:
 
 
 class TestConvergence:
-    """apply_converging reconciles RtD's insert-and-shift placement.
+    """apply_converging reconciles whatever placement RtD gives new records.
 
-    FakeRtd models the observed RtD behavior: new records land at the tail
-    rather than their requested position, and position writes insert-and-shift.
-    A single apply pass therefore leaves added records out of order; the
-    converging driver re-diffs and re-applies until the live state matches.
+    The slot RtD assigns on create isn't fixed (the bulk API apply landed
+    records at the tail; the UI inserts at the top), so these tests run the
+    converging driver against several create placements and assert it always
+    reaches the source ordering. A single apply can't: its diff is computed
+    before the adds exist, so it enumerates no reorders for them.
     """
 
     def _source(self) -> RedirectSet:
-        # The specific rule must precede the general one, but it sorts AFTER it
-        # by identity ("/ray-air/*" < "/ray-air/examples/*"), so an identity-
-        # ordered add places the two in the wrong relative order.
+        # /a/sub/* (specific) must precede /a/* (general), but it sorts AFTER it
+        # by identity, so an identity-ordered add can place them out of order.
         return RedirectSet([
             _page("/keep", "/dest", 0),
-            _page("/ray-air/examples/*", "/examples", 1),
-            _page("/ray-air/*", "/air", 2),
+            _page("/a/sub/*", "/sub", 1),
+            _page("/a/*", "/general", 2),
         ])
 
-    def test_single_apply_leaves_new_records_out_of_order(self):
-        fake = FakeRtd([_page("/keep", "/dest", 0)])
+    def test_single_apply_can_leave_a_shadowed_rule(self):
+        fake = FakeRtd(create_mode="append")
         source = self._source()
         # The one-shot diff has no reorders — the new records don't exist yet.
         apply(diff(source, RedirectSet(fake.list_redirects())), fake, log=io.StringIO())
         residual = diff(source, RedirectSet(fake.list_redirects()))
         assert not residual.is_empty
         order = [r.from_url for r in fake.list_redirects()]
-        assert order.index("/ray-air/*") < order.index("/ray-air/examples/*")
+        assert order.index("/a/*") < order.index("/a/sub/*")  # general shadows specific
 
-    def test_apply_converging_reaches_zero_drift_and_correct_order(self):
-        fake = FakeRtd([_page("/keep", "/dest", 0)])
+    @pytest.mark.parametrize("create_mode", ["honor", "append", "prepend"])
+    def test_converges_regardless_of_create_placement(self, create_mode: str):
+        fake = FakeRtd(create_mode=create_mode)
         source = self._source()
         outcome = apply_converging(source, fake, log=io.StringIO())
         assert outcome.converged
         assert diff(source, RedirectSet(fake.list_redirects())).is_empty
         order = [r.from_url for r in fake.list_redirects()]
-        assert order == ["/keep", "/ray-air/examples/*", "/ray-air/*"]
+        assert order == ["/keep", "/a/sub/*", "/a/*"]
 
     def test_reports_residual_when_it_cannot_settle(self):
-        fake = StuckRtd([_page("/keep", "/dest", 0)])
+        fake = StuckRtd()
         source = self._source()
         outcome = apply_converging(source, fake, max_passes=3, log=io.StringIO())
         assert not outcome.converged
