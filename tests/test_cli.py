@@ -641,3 +641,135 @@ class TestErrorHandling:
             client_factory=factory,
         )
         assert rc == EXIT_PARSE
+
+
+class TestDuplicateHandling:
+    """DOC-946: live duplicate (from_url, type) identities must not crash the
+    read path. plan/dump warn, audit treats them as drift, apply heals them.
+    Before the fix these commands died with an uncaught ValueError traceback.
+    """
+
+    @staticmethod
+    def _dup_pair() -> list[Redirect]:
+        # The /serialization.html discovery shape: one identity, two records,
+        # the lower-position one fires the *wrong* target (the dangerous case).
+        return [
+            Redirect(
+                from_url="/serialization.html", to_url="/configure.html",
+                type="exact", position=0, pk=7486,  # kept — what RtD serves
+            ),
+            Redirect(
+                from_url="/serialization.html", to_url="/ray-core/serial.html",
+                type="exact", position=1, pk=7450,  # shadowed, different target
+            ),
+        ]
+
+    def test_plan_warns_and_does_not_crash(
+        self, tmp_path: Path, mock_client: MagicMock, factory,
+        capsys: pytest.CaptureFixture,
+    ):
+        _write_yaml(tmp_path / "r.yaml", """
+            schema_version: 1
+            redirects:
+              - from: /serialization.html
+                to:   /configure.html
+                type: exact
+        """)
+        mock_client.list_redirects.return_value = self._dup_pair()
+        rc = main(
+            ["plan", "--project", "p", "--file", str(tmp_path / "r.yaml")],
+            client_factory=factory,
+        )
+        assert rc == EXIT_OK
+        err = capsys.readouterr().err
+        assert "duplicate live" in err
+        assert "DIFFERENT TARGET" in err
+
+    def test_audit_treats_duplicate_as_drift(
+        self, tmp_path: Path, mock_client: MagicMock, factory,
+        capsys: pytest.CaptureFixture,
+    ):
+        # YAML matches the kept record exactly, so the deduped diff is empty —
+        # the duplicate alone must still register as drift.
+        _write_yaml(tmp_path / "r.yaml", """
+            schema_version: 1
+            redirects:
+              - from: /serialization.html
+                to:   /configure.html
+                type: exact
+        """)
+        mock_client.list_redirects.return_value = self._dup_pair()
+        rc = main(
+            ["audit", "--project", "p", "--file", str(tmp_path / "r.yaml")],
+            client_factory=factory,
+        )
+        assert rc == EXIT_DRIFT
+        err = capsys.readouterr().err
+        assert "drift detected" in err
+        assert "duplicate live" in err
+
+    def test_dump_emits_kept_only_and_round_trips(
+        self, tmp_path: Path, mock_client: MagicMock, factory,
+        capsys: pytest.CaptureFixture,
+    ):
+        mock_client.list_redirects.return_value = self._dup_pair()
+        out_path = tmp_path / "out.yaml"
+        rc = main(
+            ["dump", "--project", "p", "--output", str(out_path)],
+            client_factory=factory,
+        )
+        assert rc == EXIT_OK
+        assert "duplicate live" in capsys.readouterr().err
+        doc = yaml.safe_load(out_path.read_text())
+        entries = [e for e in doc["redirects"] if e["from"] == "/serialization.html"]
+        assert len(entries) == 1  # only the kept record is written
+        assert entries[0]["to"] == "/configure.html"
+        # The dumped YAML re-parses without the duplicate-identity error.
+        from rtd_redirects.parse import parse_file
+        assert len(parse_file(out_path)) == 1
+
+    def test_apply_heals_live_duplicate(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture,
+    ):
+        _write_yaml(tmp_path / "r.yaml", """
+            schema_version: 1
+            redirects:
+              - from: /serialization.html
+                to:   /configure.html
+                type: exact
+        """)
+        fake = FakeRtd(initial=self._dup_pair())
+        rc = main(
+            ["apply", "--project", "p", "--file", str(tmp_path / "r.yaml"), "--yes"],
+            client_factory=lambda _project: fake,
+        )
+        assert rc == EXIT_OK
+        live = fake.list_redirects()
+        assert len(live) == 1
+        assert live[0].to_url == "/configure.html"
+        assert "duplicate live" in capsys.readouterr().err
+
+    def test_same_target_duplicate_not_flagged_dangerous(
+        self, tmp_path: Path, mock_client: MagicMock, factory,
+        capsys: pytest.CaptureFixture,
+    ):
+        # Pure double-insert (same target): warn, but not [DIFFERENT TARGET].
+        _write_yaml(tmp_path / "r.yaml", """
+            schema_version: 1
+            redirects:
+              - from: /dep.html
+                to:   /deps
+                type: exact
+        """)
+        mock_client.list_redirects.return_value = [
+            Redirect(from_url="/dep.html", to_url="/deps", type="exact", position=0, pk=1),
+            Redirect(from_url="/dep.html", to_url="/deps", type="exact", position=1, pk=2),
+        ]
+        rc = main(
+            ["plan", "--project", "p", "--file", str(tmp_path / "r.yaml")],
+            client_factory=factory,
+        )
+        assert rc == EXIT_OK
+        err = capsys.readouterr().err
+        assert "duplicate live" in err
+        assert "DIFFERENT TARGET" not in err

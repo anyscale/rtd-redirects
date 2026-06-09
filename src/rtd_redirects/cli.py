@@ -21,6 +21,7 @@ import argparse
 import os
 import sys
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import TextIO
 
@@ -32,7 +33,7 @@ from rtd_redirects.collapse import collapse
 from rtd_redirects.diff import Diff, diff
 from rtd_redirects.diff_file import GitError, diff_file
 from rtd_redirects.exceptions import ParseError
-from rtd_redirects.model import RedirectSet
+from rtd_redirects.model import DuplicateGroup, RedirectSet
 from rtd_redirects.parse import SCHEMA_VERSION, parse_file
 from rtd_redirects.validate import Finding, fix_ordering, validate
 
@@ -192,7 +193,12 @@ def _cmd_list(args: argparse.Namespace, *, client_factory: ClientFactory) -> int
 
 def _cmd_dump(args: argparse.Namespace, *, client_factory: ClientFactory) -> int:
     client = client_factory(_resolve_project(args))
-    entries = collapse(client.list_redirects())
+    # Emit one record per identity (the lowest-position one RtD serves) so the
+    # dumped YAML re-parses cleanly. Duplicates RtD permits are reported to
+    # stderr, not written, keeping the bootstrap file a clean source of truth.
+    target, dups = RedirectSet.from_api(client.list_redirects())
+    _print_duplicate_groups(dups)
+    entries = collapse(target)
     doc = {"schema_version": SCHEMA_VERSION, "redirects": entries}
     yaml_text = yaml.safe_dump(doc, sort_keys=False, default_flow_style=False)
     if args.output:
@@ -206,7 +212,8 @@ def _cmd_dump(args: argparse.Namespace, *, client_factory: ClientFactory) -> int
 def _cmd_plan(args: argparse.Namespace, *, client_factory: ClientFactory) -> int:
     source = parse_file(Path(args.file))
     client = client_factory(_resolve_project(args))
-    target = RedirectSet(client.list_redirects())
+    target, dups = RedirectSet.from_api(client.list_redirects())
+    _print_duplicate_groups(dups)
     d = diff(source, target)
     _print_diff(d)
     if d.is_empty:
@@ -247,8 +254,14 @@ def _cmd_apply(args: argparse.Namespace, *, client_factory: ClientFactory) -> in
             return EXIT_VALIDATION
 
     client = client_factory(_resolve_project(args))
-    target = RedirectSet(client.list_redirects())
+    target, dups = RedirectSet.from_api(client.list_redirects())
+    _print_duplicate_groups(dups, file=sys.stderr)
     d = diff(source, target)
+    shadowed = [s for g in dups for s in g.shadowed]
+    if shadowed:
+        # apply_converging heals these (deletes the shadowed extras); fold them
+        # into the preview so the confirmation prompt reflects the real change.
+        d = replace(d, deletes=d.deletes + shadowed)
 
     if d.is_empty:
         print("apply: no changes", file=sys.stderr)
@@ -292,24 +305,27 @@ def _cmd_audit(args: argparse.Namespace, *, client_factory: ClientFactory) -> in
     findings = validate(source)
 
     client = client_factory(_resolve_project(args))
-    target = RedirectSet(client.list_redirects())
+    target, dups = RedirectSet.from_api(client.list_redirects())
     d = diff(source, target)
 
-    if not d.is_empty:
+    # Live duplicate identities are drift: RtD permits them, the source-of-truth
+    # doesn't, and they shadow records or serve the wrong target until healed.
+    drift = not d.is_empty or bool(dups)
+    if drift:
         print("audit: drift detected", file=sys.stderr)
-        _print_diff(d, file=sys.stderr)
+        if not d.is_empty:
+            _print_diff(d, file=sys.stderr)
+        _print_duplicate_groups(dups, file=sys.stderr)
     else:
         print("audit: no drift", file=sys.stderr)
 
     if findings:
         _print_findings(findings, file=sys.stderr)
 
-    has_errors = any(f.severity == "error" for f in findings)
-    if not d.is_empty and has_errors:
-        return EXIT_VALIDATION  # validation errors take precedence
-    if has_errors:
+    # Validation errors take precedence over drift in the exit code.
+    if any(f.severity == "error" for f in findings):
         return EXIT_VALIDATION
-    if not d.is_empty:
+    if drift:
         return EXIT_DRIFT
     return EXIT_OK
 
@@ -363,6 +379,41 @@ def _write_yaml(path: Path, source: RedirectSet) -> None:
         new_doc["defaults"] = raw["defaults"]
     new_doc["redirects"] = collapse(source)
     path.write_text(yaml.safe_dump(new_doc, sort_keys=False, default_flow_style=False))
+
+
+def _print_duplicate_groups(
+    groups: list[DuplicateGroup], *, file: TextIO | None = None
+) -> None:
+    """Warn about duplicate live identities. Empty input produces no output.
+
+    RtD permits duplicate ``(from_url, type)`` records; the source-of-truth
+    keeps one per identity. The read path serves the lowest-position record and
+    treats the rest as drift. ``[DIFFERENT TARGET]`` flags the dangerous case
+    where a shadowed duplicate intended a different destination, so the live
+    redirect silently serves the wrong target.
+    """
+    if file is None:
+        file = sys.stderr
+    if not groups:
+        return
+    n = len(groups)
+    print(
+        f"\nwarning: {n} duplicate live "
+        f"identit{'y' if n == 1 else 'ies'} on RtD "
+        "(RtD permits these; the source-of-truth treats them as drift):",
+        file=file,
+    )
+    for g in groups:
+        from_url, type_ = g.identity
+        flag = "" if g.same_target else "  [DIFFERENT TARGET]"
+        shadowed = "; ".join(
+            f"pk={s.pk} @pos {s.position} -> {s.to_url}" for s in g.shadowed
+        )
+        print(
+            f"  ({from_url}, {type_}): serving pk={g.kept.pk} @pos "
+            f"{g.kept.position} -> {g.kept.to_url}; shadowed {shadowed}{flag}",
+            file=file,
+        )
 
 
 def _print_findings(findings: list[Finding], *, file: TextIO | None = None) -> None:

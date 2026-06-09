@@ -47,6 +47,15 @@ The MVP is ~1000 LOC across nine modules. Each is documented at the top of the f
 - **`language_prefix` is configurable** per YAML file. Hard-coded `/en/` is not assumed anywhere except as a default.
 - **`apply` runs in safe order**: deletes free identities; adds create; updates settle data; reorders fix positions last so the position counter doesn't churn during data changes.
 - **Reorders are mutually exclusive with updates** — a position-plus-other-field change is an update (one PUT sets both); a position-only change is a reorder.
+- **Duplicate identities are tolerated on read and healed by `apply`, but rejected in authored YAML.** RtD permits them; the tool doesn't. See [Duplicate identities](#duplicate-identities) below.
+
+### Duplicate identities
+
+RtD's v3 API doesn't enforce `(from_url, type)` uniqueness. The dashboard can create duplicate redirects, and a one-time 2023 bulk import left several on `anyscale-ray` ([DOC-946](https://anyscale1.atlassian.net/browse/DOC-946)). Because the tool keys on identity, the two ingestion paths handle this asymmetrically:
+
+- **Authored YAML fails loudly.** `parse` rejects duplicate identities — two entries with the same `(from_url, type)` is almost always a copy-paste mistake. The `ParseError` names the offending identity and the fix (merge or remove).
+- **Live API data is tolerated.** `RedirectSet.from_api` keeps the lowest-`position` record — the one RtD serves under strict first-match — and returns the shadowed extras as `DuplicateGroup`s. `dump`, `plan`, and `audit` warn and keep going instead of crashing; `dump` writes only the kept record so its YAML re-parses cleanly; `audit` counts a live duplicate as drift.
+- **`apply` heals.** `apply_converging` folds the shadowed extras into its deletes, so applying a clean YAML removes the duplicates and converges the project to one record per identity. A duplicate introduced by a botched POST retry (RtD has no idempotency key, so an at-least-once retry after a lost response can double-insert) is caught and deleted on the next pass — the convergence loop, not a per-add pre-check, is the safety net.
 
 ## Redirect types (current RtD API, verified May 2026)
 
