@@ -212,3 +212,87 @@ class TestConvergence:
         assert not outcome.converged
         assert outcome.passes == 3
         assert not outcome.residual.is_empty
+
+
+class _DoubleCreateRtd(FakeRtd):
+    """At-least-once POST: ``create_redirect`` inserts twice, as a retried POST
+    would after a lost response — the duplicate-creation hazard DOC-946 names."""
+
+    def create_redirect(self, r: Redirect) -> Redirect:
+        created = super().create_redirect(r)
+        super().create_redirect(r)  # the retry lands a second copy
+        return created
+
+
+class _UndeletableRtd(FakeRtd):
+    """``delete_redirect`` is a no-op, so a live duplicate can never be healed."""
+
+    def delete_redirect(self, pk: int) -> None:
+        pass
+
+
+class TestDuplicateHeal:
+    """apply_converging heals the duplicate identities RtD permits but our
+    source-of-truth doesn't: shadowed extras are deleted and live converges to
+    one record per identity.
+    """
+
+    def test_heals_seeded_live_duplicate(self):
+        # Two live records for one identity (insertion order = RtD position).
+        fake = FakeRtd(initial=[
+            _r("/dep.html", to_url="/deps", pk=7454),  # kept (position 0)
+            _r("/dep.html", to_url="/deps", pk=7289),  # shadowed
+        ])
+        source = RedirectSet([_r("/dep.html", to_url="/deps")])
+        outcome = apply_converging(source, fake, log=io.StringIO())
+        assert outcome.converged
+        live = fake.list_redirects()
+        assert len(live) == 1
+        assert outcome.result.deleted == 1  # the shadowed extra only
+
+    def test_heals_duplicate_with_different_target(self):
+        # The /serialization.html discovery shape: the record RtD serves fires
+        # the WRONG target; source wants the shadowed one's target. Heal deletes
+        # the extra and updates the survivor.
+        fake = FakeRtd(initial=[
+            _r("/serialization.html", to_url="/configure.html", pk=7486),        # kept
+            _r("/serialization.html", to_url="/ray-core/serial.html", pk=7450),  # shadowed
+        ])
+        source = RedirectSet([_r("/serialization.html", to_url="/ray-core/serial.html")])
+        outcome = apply_converging(source, fake, log=io.StringIO())
+        assert outcome.converged
+        live = fake.list_redirects()
+        assert len(live) == 1
+        assert live[0].to_url == "/ray-core/serial.html"
+
+    def test_botched_retry_twin_is_healed_next_pass(self):
+        fake = _DoubleCreateRtd()
+        source = RedirectSet([_r("/new.html", to_url="/dest")])
+        outcome = apply_converging(source, fake, log=io.StringIO())
+        assert outcome.converged
+        assert len(fake.list_redirects()) == 1
+        assert outcome.result.added == 1
+        assert outcome.result.deleted == 1  # the retry's twin, removed on a later pass
+
+    def test_unhealed_duplicate_surfaces_in_residual(self):
+        fake = _UndeletableRtd(initial=[
+            _r("/x", to_url="/dest", pk=1),  # kept
+            _r("/x", to_url="/dest", pk=2),  # shadowed, undeletable
+        ])
+        source = RedirectSet([_r("/x", to_url="/dest")])
+        outcome = apply_converging(source, fake, max_passes=3, log=io.StringIO())
+        assert not outcome.converged
+        assert outcome.passes == 3
+        assert any(r.pk == 2 for r in outcome.residual.deletes)
+
+    def test_clean_data_is_unaffected(self):
+        # No duplicates: behavior identical to the pre-heal converging driver.
+        fake = FakeRtd(initial=[_r("/a", to_url="/dest", position=0, pk=1)])
+        source = RedirectSet([
+            _r("/a", to_url="/dest", position=0),
+            _r("/b", to_url="/dest2", position=1),
+        ])
+        outcome = apply_converging(source, fake, log=io.StringIO())
+        assert outcome.converged
+        assert outcome.result.deleted == 0
+        assert outcome.result.added == 1

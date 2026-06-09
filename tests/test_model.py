@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import pytest
 
-from rtd_redirects.model import REDIRECT_TYPES, Redirect, RedirectSet
+from rtd_redirects.model import (
+    REDIRECT_TYPES,
+    DuplicateGroup,
+    Redirect,
+    RedirectSet,
+)
 
 
 class TestRedirect:
@@ -162,3 +167,126 @@ class TestRedirectSet:
         rs = RedirectSet()
         assert (rs == 42) is False
         assert (rs == "not a set") is False
+
+
+class TestFromApi:
+    """RedirectSet.from_api tolerates the duplicate identities RtD permits."""
+
+    @staticmethod
+    def _r(
+        from_url: str,
+        *,
+        to_url: str = "/dest",
+        type: str = "exact",
+        position: int = 0,
+        pk: int | None = None,
+    ) -> Redirect:
+        return Redirect(
+            from_url=from_url, to_url=to_url, type=type, position=position, pk=pk,
+        )
+
+    def test_clean_data_returns_no_groups(self):
+        rs, groups = RedirectSet.from_api([
+            self._r("/a", position=0, pk=1),
+            self._r("/b", position=1, pk=2),
+        ])
+        assert groups == []
+        assert rs.identities() == {("/a", "exact"), ("/b", "exact")}
+
+    def test_keeps_lowest_position_record(self):
+        # The anyscale-ray discovery shape: same identity, two positions.
+        rs, groups = RedirectSet.from_api([
+            self._r("/dep.html", position=235, pk=7289),
+            self._r("/dep.html", position=70, pk=7454),
+        ])
+        assert len(rs) == 1
+        assert rs.get(("/dep.html", "exact")).pk == 7454  # the pos-70 record fires
+        assert len(groups) == 1
+        assert groups[0].kept.pk == 7454
+        assert [s.pk for s in groups[0].shadowed] == [7289]
+
+    def test_shadowed_records_retain_pks_for_deletion(self):
+        _, groups = RedirectSet.from_api([
+            self._r("/x", position=0, pk=10),
+            self._r("/x", position=5, pk=20),
+            self._r("/x", position=9, pk=30),
+        ])
+        assert [s.pk for s in groups[0].shadowed] == [20, 30]
+
+    def test_never_drops_a_record(self):
+        records = [
+            self._r("/x", position=0, pk=1),
+            self._r("/x", position=1, pk=2),
+            self._r("/y", position=2, pk=3),
+        ]
+        rs, groups = RedirectSet.from_api(records)
+        accounted = len(rs) + sum(len(g.shadowed) for g in groups)
+        assert accounted == len(records)
+
+    def test_groups_sorted_by_identity(self):
+        _, groups = RedirectSet.from_api([
+            self._r("/z", position=0, pk=1),
+            self._r("/z", position=1, pk=2),
+            self._r("/a", position=2, pk=3),
+            self._r("/a", position=3, pk=4),
+        ])
+        assert [g.identity for g in groups] == [("/a", "exact"), ("/z", "exact")]
+
+    def test_position_tie_breaks_on_pk(self):
+        rs, groups = RedirectSet.from_api([
+            self._r("/x", position=0, pk=99),
+            self._r("/x", position=0, pk=12),
+        ])
+        assert rs.get(("/x", "exact")).pk == 12
+        assert [s.pk for s in groups[0].shadowed] == [99]
+
+    def test_same_from_url_different_type_is_not_a_duplicate(self):
+        rs, groups = RedirectSet.from_api([
+            self._r("/a", type="exact", pk=1),
+            self._r("/a", type="page", pk=2),
+        ])
+        assert groups == []
+        assert len(rs) == 2
+
+    def test_result_set_round_trips_clean(self):
+        # The deduped set has one record per identity, so it never trips add().
+        rs, _ = RedirectSet.from_api([
+            self._r("/x", position=0, pk=1),
+            self._r("/x", position=1, pk=2),
+        ])
+        assert RedirectSet(list(rs)) == rs  # constructor accepts it without raising
+
+
+class TestDuplicateGroup:
+    @staticmethod
+    def _r(from_url: str, to_url: str, *, position: int = 0, pk: int = 0) -> Redirect:
+        return Redirect(
+            from_url=from_url, to_url=to_url, type="exact", position=position, pk=pk,
+        )
+
+    def test_same_target_true(self):
+        g = DuplicateGroup(
+            identity=("/x", "exact"),
+            kept=self._r("/x", "/dest", pk=1),
+            shadowed=[self._r("/x", "/dest", pk=2)],
+        )
+        assert g.same_target is True
+
+    def test_same_target_false_is_the_dangerous_case(self):
+        # /serialization.html fired the wrong target in the discovery data.
+        g = DuplicateGroup(
+            identity=("/serialization.html", "exact"),
+            kept=self._r("/serialization.html", "/configure.html", position=38, pk=7486),
+            shadowed=[
+                self._r("/serialization.html", "/ray-core/serial.html", position=74, pk=7450),
+            ],
+        )
+        assert g.same_target is False
+
+    def test_same_target_false_when_any_shadowed_differs(self):
+        g = DuplicateGroup(
+            identity=("/x", "exact"),
+            kept=self._r("/x", "/dest", pk=1),
+            shadowed=[self._r("/x", "/dest", pk=2), self._r("/x", "/other", pk=3)],
+        )
+        assert g.same_target is False

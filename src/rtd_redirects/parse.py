@@ -44,6 +44,24 @@ class _Ctx:
     index: int
 
 
+def _duplicate_identity_error(source: Path, r: Redirect) -> ParseError:
+    """A ``ParseError`` that names the offending identity and the way out.
+
+    Authored YAML must hold one entry per ``(from_url, type)`` — a collision is
+    almost always a copy-paste mistake, so the parser fails loudly. Live RtD
+    data is different: RtD permits duplicate identities, and the read path
+    (``plan`` / ``audit`` / ``apply`` / ``dump``) tolerates them, keeping the
+    lowest-position record. See DOC-946.
+    """
+    return ParseError(
+        f"{source}: duplicate redirect identity {r.identity}: more than one "
+        "entry resolves to the same (from_url, type). Authored YAML must have "
+        "one entry per identity — merge or remove the duplicate. (Live RtD "
+        "data may legitimately contain duplicates; plan, audit, apply, and "
+        "dump tolerate them and keep the lowest-position record.)"
+    )
+
+
 def parse_files(files: Iterable[Path]) -> RedirectSet:
     """Parse one or more YAML files into a single ``RedirectSet``.
 
@@ -56,7 +74,7 @@ def parse_files(files: Iterable[Path]) -> RedirectSet:
             try:
                 rs.add(r)
             except ValueError as e:
-                raise ParseError(f"{path}: {e}") from e
+                raise _duplicate_identity_error(path, r) from e
     return rs
 
 
@@ -78,7 +96,7 @@ def parse_text(text: str, *, source: str | Path = "<input>") -> RedirectSet:
         try:
             rs.add(r)
         except ValueError as e:
-            raise ParseError(f"{source_path}: {e}") from e
+            raise _duplicate_identity_error(source_path, r) from e
     return rs
 
 

@@ -497,8 +497,27 @@ class TestMultiFile:
                 to: /two
                 type: exact
         """)
-        with pytest.raises(ParseError, match="Duplicate identity"):
+        with pytest.raises(ParseError, match="duplicate redirect identity"):
             parse_files([a, b])
+
+    def test_duplicate_identity_message_names_resolution(self, tmp_path: Path):
+        """AC-1: authored-YAML duplicates fail with a clear remediation message."""
+        f = _write(tmp_path, "dup.yaml", """
+            schema_version: 1
+            redirects:
+              - from: /dup
+                to: /one
+                type: exact
+              - from: /dup
+                to: /two
+                type: exact
+        """)
+        with pytest.raises(ParseError) as exc:
+            parse_file(f)
+        msg = str(exc.value)
+        assert "('/dup', 'exact')" in msg   # names the offending identity
+        assert "merge or remove" in msg     # the resolution path
+        assert "Live RtD data" in msg       # notes live duplicates are tolerated
 
     def test_same_from_different_type_across_files_ok(self, tmp_path: Path):
         a = _write(tmp_path, "a.yaml", """
