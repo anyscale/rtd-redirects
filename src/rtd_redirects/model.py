@@ -68,6 +68,32 @@ class Redirect:
         return (self.from_url, self.type)
 
 
+@dataclass(frozen=True)
+class DuplicateGroup:
+    """Live API records that share one ``(from_url, type)`` identity.
+
+    RtD's v3 API doesn't enforce identity uniqueness, but ``RedirectSet`` keys
+    on identity, so :meth:`RedirectSet.from_api` keeps one record and sets the
+    rest aside here. ``kept`` is the record RtD actually serves — the lowest
+    ``position`` under RtD's strict first-match rule. ``shadowed`` are the
+    unreachable extras, in position order.
+    """
+
+    identity: tuple[str, str]
+    kept: Redirect
+    shadowed: list[Redirect]
+
+    @property
+    def same_target(self) -> bool:
+        """True when every shadowed record shares ``kept``'s ``to_url``.
+
+        ``False`` is the dangerous case: the identity resolves to a different
+        destination than a shadowed duplicate intended, so the live redirect
+        silently serves the wrong target.
+        """
+        return all(s.to_url == self.kept.to_url for s in self.shadowed)
+
+
 class RedirectSet:
     """Ordered collection of ``Redirect`` records, keyed by identity.
 
@@ -80,6 +106,41 @@ class RedirectSet:
         self._by_identity: dict[tuple[str, str], Redirect] = {}
         for r in redirects:
             self.add(r)
+
+    @classmethod
+    def from_api(
+        cls, records: Iterable[Redirect]
+    ) -> tuple[RedirectSet, list[DuplicateGroup]]:
+        """Build a set from live API records, tolerating duplicate identities.
+
+        RtD's v3 API doesn't enforce ``(from_url, type)`` uniqueness: the
+        dashboard can create duplicate redirects, and a retried POST could too.
+        The constructor and ``add`` reject duplicates so *authored* YAML fails
+        loudly, but live API data must not crash the read path.
+
+        Keeps the lowest-``position`` record per identity — the one RtD serves
+        under strict first-match — and returns the shadowed extras as
+        ``DuplicateGroup`` records. Never silently drops a record: every
+        duplicate is reported so callers can warn, treat it as drift, or delete
+        it. Groups are sorted by identity for stable output.
+        """
+        grouped: dict[tuple[str, str], list[Redirect]] = {}
+        for r in records:
+            grouped.setdefault(r.identity, []).append(r)
+
+        kept: list[Redirect] = []
+        groups: list[DuplicateGroup] = []
+        for identity, recs in grouped.items():
+            ordered = sorted(recs, key=lambda r: (r.position, r.pk or 0))
+            kept.append(ordered[0])
+            if len(ordered) > 1:
+                groups.append(DuplicateGroup(
+                    identity=identity, kept=ordered[0], shadowed=ordered[1:],
+                ))
+
+        groups.sort(key=lambda g: g.identity)
+        # kept identities are unique by construction; the constructor re-checks.
+        return cls(kept), groups
 
     def add(self, r: Redirect) -> None:
         if r.identity in self._by_identity:
