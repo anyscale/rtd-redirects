@@ -14,7 +14,7 @@ at the per-record level.
 from __future__ import annotations
 
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TextIO
 
 from rtd_redirects.client import RtdClient
@@ -108,6 +108,26 @@ class ConvergeResult:
         return self.residual.is_empty
 
 
+def _live_diff(source: RedirectSet, client: RtdClient) -> Diff:
+    """Re-fetch live state and diff it against ``source``, healing duplicates.
+
+    RtD permits duplicate ``(from_url, type)`` identities; the source-of-truth
+    allows one per identity. :meth:`RedirectSet.from_api` keeps the record RtD
+    serves (lowest position) and surfaces the shadowed extras. Those extras are
+    unreachable drift, so they're folded into the diff's deletes — ``apply``
+    removes them and the live state converges to one record per identity. The
+    shadowed records carry their API ``pk``s, so the delete path can address
+    them. This also makes the converging loop self-healing: a duplicate created
+    by a botched POST-retry is caught and deleted on the next pass.
+    """
+    target, dups = RedirectSet.from_api(client.list_redirects())
+    d = diff(source, target)
+    shadowed = [s for g in dups for s in g.shadowed]
+    if shadowed:
+        d = replace(d, deletes=d.deletes + shadowed)
+    return d
+
+
 def apply_converging(
     source: RedirectSet,
     client: RtdClient,
@@ -125,6 +145,10 @@ def apply_converging(
     pass re-fetches live state, diffs it against ``source``, and applies the
     remainder, stopping when the diff is empty or ``max_passes`` is reached.
 
+    Live duplicate identities are healed along the way (see :func:`_live_diff`):
+    the shadowed extras become deletes, so an apply also converges a project
+    whose live state carries the duplicates RtD permits but our model doesn't.
+
     The returned :class:`ConvergeResult` carries the cumulative counts and the
     final ``residual``. A non-empty residual means the apply did not converge;
     callers should surface that rather than report success, because an
@@ -137,8 +161,7 @@ def apply_converging(
     passes = 0
 
     while passes < max_passes:
-        target = RedirectSet(client.list_redirects())
-        residual = diff(source, target)
+        residual = _live_diff(source, client)
         if residual.is_empty:
             return ConvergeResult(result=result, passes=passes, residual=residual)
         pass_result = apply(residual, client, log=out)
@@ -149,6 +172,5 @@ def apply_converging(
         passes += 1
 
     # Final read so the caller learns whether the last pass settled the state.
-    target = RedirectSet(client.list_redirects())
-    residual = diff(source, target)
+    residual = _live_diff(source, client)
     return ConvergeResult(result=result, passes=passes, residual=residual)
