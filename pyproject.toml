@@ -3,7 +3,7 @@ requires = ["setuptools>=64", "setuptools-scm>=8"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "rtd-redirects"
+name = "anyscale-rtd-redirects"
 description = "Manage Read the Docs redirects as code via a YAML source of truth reconciled against the RtD v3 API."
 readme = "README.md"
 requires-python = ">=3.10"

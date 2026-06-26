@@ -137,7 +137,7 @@ Captured here so it doesn't get lost. Listed in rough priority order.
 ### Operational follow-ups (no code work in this repo)
 
 1. **First real `dump` against `anyscale-ray`** — bootstrap the source-of-truth YAML for `ray-project/ray/doc/redirects/current.yaml`. Tracked under [DOC-928](https://anyscale1.atlassian.net/browse/DOC-928).
-1. **PyPI release of `0.1.0`** — publish so `pip install rtd-redirects` works without a clone. Set up a GitHub Actions workflow that builds and publishes on tag.
+1. **PyPI release of `0.1.0`** — publish the distribution as `anyscale-rtd-redirects` so `python -m pip install anyscale-rtd-redirects` works without a clone. Keep the installed CLI command as `rtd-redirects`. Set up a GitHub Actions workflow that builds and publishes on tag.
 1. **Buildkite integration (phase 2)** — PR-time `diff-file` step and merge-time `apply` step in `ray-project/ray/.buildkite/`. Path-filtered to `doc/redirects/**` so it adds no work to Ray's existing test graph. Lives in the Ray repo, not this one.
 1. **Bot-user provisioning handoff** — `anyscale-ray-docs-ops` RtD user provisioned by REEf + IT. Switch from personal admin token to bot-user token in 1Password and Buildkite secrets once landed.
 
@@ -173,7 +173,7 @@ These resolve during the rollout, not as code changes here:
 
 1. **RtD version-switcher behavior for renamed paths** — design.md §"Trade-offs the team should understand". Test during the week-3 backfill: when a user on `/en/latest/<renamed>` switches to a legacy version where that path doesn't exist, does RtD's version-switcher fall back gracefully? If not, file upstream or document the constraint.
 1. **Buildkite fork-PR policy** — need a Buildkite-specific answer for how fork PRs are handled for the redirect pipeline. The proposed step-level scoping keeps the apply step away from PR events entirely; verify that's sufficient.
-1. **Final tool/package name** — `rtd-redirects` is the working name. Confirmed indefinite through MVP; re-validate before wiring into Ray's Buildkite.
+1. **Final tool/package name** — the repository and CLI keep the `rtd-redirects` name, but the PyPI distribution is `anyscale-rtd-redirects` because the `rtd-redirects` distribution name is already occupied.
 
 ## What lives where (anti-confusion)
 
