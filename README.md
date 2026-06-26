@@ -13,12 +13,63 @@ Read the Docs has no bulk redirect import. Its dashboard UI requires clicking th
 ## Install
 
 ```bash
-git clone git@github.com:anyscale/rtd-redirects.git
-cd rtd-redirects
-pip install -e .
+python -m pip install anyscale-rtd-redirects
 ```
 
-Once `0.1.0` is published to PyPI, the installation simplifies to `pip install rtd-redirects`.
+The PyPI distribution is `anyscale-rtd-redirects`. The installed CLI command is
+still `rtd-redirects`.
+
+For local development, install the package in editable mode:
+
+```bash
+git clone git@github.com:anyscale/rtd-redirects.git
+cd rtd-redirects
+python -m pip install -e .[dev]
+```
+
+## Release
+
+The package publishes to PyPI as `anyscale-rtd-redirects`. The command-line
+entry point remains `rtd-redirects`.
+
+Before the first release, configure a PyPI Trusted Publisher with the following
+values:
+
+| Field | Value |
+|---|---|
+| PyPI project | `anyscale-rtd-redirects` |
+| Owner | `anyscale` |
+| Repository | `rtd-redirects` |
+| Workflow | `publish.yml` |
+| Environment | `pypi` |
+
+To publish a release, complete the following steps:
+
+1. Verify the test and package checks locally:
+
+   ```bash
+   python -m pip install --upgrade -e .[dev] build twine
+   ruff check .
+   pytest
+   python -m build
+   python -m twine check dist/*
+   ```
+
+1. Create and push a version tag:
+
+   ```bash
+   git tag v0.1.0
+   git push origin v0.1.0
+   ```
+
+1. Confirm the `publish` GitHub Actions workflow succeeds.
+
+1. Verify the published package from a clean environment:
+
+   ```bash
+   python -m pip install anyscale-rtd-redirects==0.1.0
+   rtd-redirects --help
+   ```
 
 ## Quick start
 
