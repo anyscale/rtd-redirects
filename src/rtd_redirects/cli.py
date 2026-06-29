@@ -4,10 +4,15 @@ Wires the six MVP subcommands end-to-end against the underlying modules:
 
 - ``list``: ``RtdClient.list_redirects``
 - ``dump``: ``RtdClient.list_redirects`` + ``collapse`` + YAML serialization
-- ``plan``: ``parse_file`` + ``RtdClient.list_redirects`` + ``diff`` (no mutation)
+- ``plan``: ``parse_files`` + ``RtdClient.list_redirects`` + ``diff`` (no mutation)
 - ``diff-file``: ``diff_file`` (git-only, no API)
-- ``apply``: ``parse_file`` + ``RtdClient.list_redirects`` + ``diff`` + ``apply``
+- ``apply``: ``parse_files`` + ``RtdClient.list_redirects`` + ``diff`` + ``apply``
 - ``audit``: same as ``plan`` but exits non-zero when drift is detected
+
+``plan``, ``apply``, ``audit``, and ``diff-file`` accept an ordered list of
+``--file`` paths and compose them as one source of truth (earlier files match
+first; see ``parse.compose``). ``validate --composed`` runs the same composition
+through the credential-free validator.
 
 The ``client_factory`` keyword on ``main()`` exists so tests can inject a
 mock client without monkeypatching the ``RtdClient`` import. Production code
@@ -34,7 +39,7 @@ from rtd_redirects.diff import Diff, diff
 from rtd_redirects.diff_file import GitError, diff_file
 from rtd_redirects.exceptions import ParseError
 from rtd_redirects.model import DuplicateGroup, RedirectSet
-from rtd_redirects.parse import SCHEMA_VERSION, parse_file
+from rtd_redirects.parse import SCHEMA_VERSION, parse_file, parse_files
 from rtd_redirects.validate import Finding, fix_ordering, validate
 
 ClientFactory = Callable[[str], RtdClient]
@@ -92,7 +97,11 @@ def _build_parser() -> argparse.ArgumentParser:
     project_help = (
         "RtD project slug. Defaults to the RTD_PROJECT_SLUG env var."
     )
-    file_help = "Path to the YAML redirect source file."
+    file_help = (
+        "Path to the YAML redirect source file. Accepts multiple ordered paths "
+        "(e.g. master.yaml current.yaml) composed as one source of truth: "
+        "earlier files match first."
+    )
 
     p_list = subparsers.add_parser(
         "list", help="List redirects currently configured on the RtD project.",
@@ -112,7 +121,9 @@ def _build_parser() -> argparse.ArgumentParser:
         "plan", help="Show the diff between a YAML file and the RtD project.",
     )
     p_plan.add_argument("--project", "-p", default=None, help=project_help)
-    p_plan.add_argument("--file", "-f", required=True, help=file_help)
+    p_plan.add_argument(
+        "--file", "-f", required=True, nargs="+", metavar="FILE", help=file_help,
+    )
     p_plan.add_argument(
         "--strict", action="store_true",
         help="Run the order / chain validator and exit non-zero on any error finding.",
@@ -129,7 +140,9 @@ def _build_parser() -> argparse.ArgumentParser:
         "--head", default="HEAD",
         help="Head git ref (default: HEAD).",
     )
-    p_diff.add_argument("--file", "-f", required=True, help=file_help)
+    p_diff.add_argument(
+        "--file", "-f", required=True, nargs="+", metavar="FILE", help=file_help,
+    )
     p_diff.add_argument(
         "--repo", default=None,
         help="Path to the repository (default: current working directory).",
@@ -139,7 +152,9 @@ def _build_parser() -> argparse.ArgumentParser:
         "apply", help="Apply a YAML file to the RtD project.",
     )
     p_apply.add_argument("--project", "-p", default=None, help=project_help)
-    p_apply.add_argument("--file", "-f", required=True, help=file_help)
+    p_apply.add_argument(
+        "--file", "-f", required=True, nargs="+", metavar="FILE", help=file_help,
+    )
     p_apply.add_argument(
         "--yes", "-y", action="store_true",
         help="Skip interactive confirmation. Required in non-interactive contexts.",
@@ -153,7 +168,9 @@ def _build_parser() -> argparse.ArgumentParser:
         "audit", help="Report drift between a YAML file and the RtD project.",
     )
     p_audit.add_argument("--project", "-p", default=None, help=project_help)
-    p_audit.add_argument("--file", "-f", required=True, help=file_help)
+    p_audit.add_argument(
+        "--file", "-f", required=True, nargs="+", metavar="FILE", help=file_help,
+    )
 
     p_validate = subparsers.add_parser(
         "validate",
@@ -168,6 +185,12 @@ def _build_parser() -> argparse.ArgumentParser:
         "--fix", action="store_true",
         help="Reorder rules deterministically to satisfy subset constraints and "
              "rewrite the file(s) in place. Chain warnings are not auto-fixed.",
+    )
+    p_validate.add_argument(
+        "--composed", action="store_true",
+        help="Validate the ordered composition of all files as one redirect set "
+             "(earlier files match first) instead of each file independently. "
+             "Catches cross-file ordering errors. Incompatible with --fix.",
     )
 
     return parser
@@ -210,7 +233,7 @@ def _cmd_dump(args: argparse.Namespace, *, client_factory: ClientFactory) -> int
 
 
 def _cmd_plan(args: argparse.Namespace, *, client_factory: ClientFactory) -> int:
-    source = parse_file(Path(args.file))
+    source = parse_files([Path(f) for f in args.file])
     client = client_factory(_resolve_project(args))
     target, dups = RedirectSet.from_api(client.list_redirects())
     _print_duplicate_groups(dups)
@@ -234,13 +257,13 @@ def _cmd_diff_file(args: argparse.Namespace, *, client_factory: ClientFactory) -
         base_ref=args.base,
         head_ref=args.head,
         repo_path=args.repo,
-    )
+    )  # args.file is a list (nargs="+"); diff_file composes it in order
     _print_diff(d)
     return EXIT_OK
 
 
 def _cmd_apply(args: argparse.Namespace, *, client_factory: ClientFactory) -> int:
-    source = parse_file(Path(args.file))
+    source = parse_files([Path(f) for f in args.file])
 
     if args.strict:
         findings = validate(source)
@@ -301,7 +324,7 @@ def _cmd_apply(args: argparse.Namespace, *, client_factory: ClientFactory) -> in
 
 
 def _cmd_audit(args: argparse.Namespace, *, client_factory: ClientFactory) -> int:
-    source = parse_file(Path(args.file))
+    source = parse_files([Path(f) for f in args.file])
     findings = validate(source)
 
     client = client_factory(_resolve_project(args))
@@ -331,7 +354,18 @@ def _cmd_audit(args: argparse.Namespace, *, client_factory: ClientFactory) -> in
 
 
 def _cmd_validate(args: argparse.Namespace, *, client_factory: ClientFactory) -> int:
-    """Validate one or more YAML files. No RtD API access required."""
+    """Validate one or more YAML files. No RtD API access required.
+
+    Default mode validates each file independently (the pre-commit contract).
+    ``--composed`` instead composes the files in order and validates the single
+    composed set, which is what catches cross-file ordering errors — a specific
+    ``master.yaml`` rule shadowed by a broad ``current.yaml`` catch-all, or the
+    reverse. Composed mode can't rewrite a set back into N files, so it's
+    incompatible with ``--fix``.
+    """
+    if args.composed:
+        return _cmd_validate_composed(args)
+
     exit_code = EXIT_OK
     for path_str in args.files:
         path = Path(path_str)
@@ -361,6 +395,30 @@ def _cmd_validate(args: argparse.Namespace, *, client_factory: ClientFactory) ->
         else:
             print(f"{path}: ok", file=sys.stderr)
     return exit_code
+
+
+def _cmd_validate_composed(args: argparse.Namespace) -> int:
+    """Validate the ordered composition of all files as one set. No API access."""
+    if args.fix:
+        print(
+            "error: --composed cannot be combined with --fix; a composed set "
+            "can't be written back into separate files. Run --fix per file "
+            "first, then --composed to check cross-file ordering.",
+            file=sys.stderr,
+        )
+        return EXIT_USAGE
+
+    source = parse_files([Path(p) for p in args.files])
+    findings = validate(source)
+    label = " + ".join(args.files)
+    if findings:
+        print(f"\ncomposed ({label}):", file=sys.stderr)
+        _print_findings(findings, file=sys.stderr)
+        if any(f.severity == "error" for f in findings):
+            return EXIT_VALIDATION
+    else:
+        print(f"composed ({label}): ok", file=sys.stderr)
+    return EXIT_OK
 
 
 def _write_yaml(path: Path, source: RedirectSet) -> None:
