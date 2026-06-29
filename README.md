@@ -191,6 +191,21 @@ repos:
 
 The hook fails the commit on any `ERROR` finding. Run `pre-commit run rtd-redirects-validate --all-files` locally to surface issues before pushing.
 
+`rtd-redirects-validate` validates each file independently, because pre-commit passes only the files a commit changed. To catch cross-file ordering errors at commit time, add the composed hook. It needs the complete ordered file list every time, so it pins the list via `args` and runs with `pass_filenames: false` rather than relying on the changed-file set:
+
+```yaml
+repos:
+  - repo: https://github.com/anyscale/rtd-redirects
+    rev: v0.1.0
+    hooks:
+      - id: rtd-redirects-validate
+        files: ^doc/redirects/.*\.ya?ml$
+      - id: rtd-redirects-validate-composed
+        args: [doc/redirects/master.yaml, doc/redirects/current.yaml]
+```
+
+Keep both: the per-file hook catches within-file mistakes on any changed file; the composed hook catches the cross-file interaction. Without `--composed`, the same cross-file check still runs in CI via `validate --composed` or `diff-file`.
+
 #### `--strict` on `plan` / `apply`
 
 `validate` is also wired into the project-bound commands for CI use:
