@@ -30,7 +30,7 @@ The MVP is ~1000 LOC across nine modules. Each is documented at the top of the f
 | `model.py` | `Redirect` dataclass + `RedirectSet`. Identity is `(from_url, type)`. |
 | `exceptions.py` | `ParseError` — shared between `parse` and `expand` to avoid a circular import. |
 | `client.py` | `RtdClient`. Token-bucket rate limit (60 rpm), pagination, 429 retry with `Retry-After`, CRUD on `/projects/<slug>/redirects/`, list on `/projects/<slug>/versions/`. |
-| `parse.py` | YAML reader. Schema validation. Routes expansion-shaped entries to `expand`. Exposes `parse_file`, `parse_files`, `parse_text`. |
+| `parse.py` | YAML reader. Schema validation. Routes expansion-shaped entries to `expand`. Exposes `parse_file`, `parse_files`, `parse_text`, and `compose` (ordered multi-file composition with global position reindex; file order is meaningful). |
 | `expand.py` | Multi-source and multi-version fan-out. Path-only-vs-fully-qualified detection. Configurable `language_prefix`. |
 | `collapse.py` | Dump-time inverse of `expand`. Groups canonical records into ergonomic YAML entries. Tier 1 only — see Deferred work below. |
 | `diff.py` | `Diff` of two `RedirectSet`s. Categories: adds / updates / deletes / reorders. |
@@ -48,6 +48,7 @@ The MVP is ~1000 LOC across nine modules. Each is documented at the top of the f
 - **`apply` runs in safe order**: deletes free identities; adds create; updates settle data; reorders fix positions last so the position counter doesn't churn during data changes.
 - **Reorders are mutually exclusive with updates** — a position-plus-other-field change is an update (one PUT sets both); a position-only change is a reorder.
 - **Duplicate identities are tolerated on read and healed by `apply`, but rejected in authored YAML.** RtD permits them; the tool doesn't. See [Duplicate identities](#duplicate-identities) below.
+- **Multiple files compose as one ordered source of truth.** `parse_files` / `compose` treat file order as meaningful (earlier files position before later ones) and reindex the composed set globally to `0..N-1`, so per-file positions that each start at zero can't produce ambiguous ordering. A single file is never reindexed. Duplicate identities are rejected across files, not just within one. `plan` / `apply` / `audit` / `diff-file` take an ordered `--file` list; `validate --composed` runs the same composition through the credential-free validator. Built for Ray's `master.yaml`-before-`current.yaml` release-staging model (DOC-1298, consumed by DOC-1301/DOC-1142).
 
 ### Duplicate identities
 
@@ -172,7 +173,6 @@ Captured here so it doesn't get lost. Listed in rough priority order.
 1. **Flask integration test fixture** — design.md mentions a `pytest` fixture with a Flask server that models the v3 API. Currently we only have unit tests with mocks. Worth adding once a real apply hits an edge the mocks didn't cover.
 1. **`apply --no-delete`** — design.md mentions a flag that skips destructive operations and applies only adds/updates. Useful for cautious first runs.
 1. **`audit --reconcile`** — design.md mentions a mode that writes drift back into the YAML source file using the `collapse` heuristic on just the drift set, with a `# backfilled by audit --reconcile on YYYY-MM-DD` marker comment.
-1. **Multi-file YAML support via CLI** — `parse_files` already handles multiple YAML files with sorted concatenation, but the CLI subcommands (`plan`, `apply`, `audit`) only accept a single `--file`. Extend to accept a directory or glob.
 1. **`list-versions` subcommand** — surface `RtdClient.list_versions` to the CLI for debugging.
 1. **Structured (JSON) output for `plan` / `diff-file`** — design.md mentions "plain-text and JSON diff output" as a goal. Add a `--format json` flag.
 

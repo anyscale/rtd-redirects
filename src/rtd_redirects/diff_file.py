@@ -1,10 +1,16 @@
-"""Compute a redirect-level diff between two git refs of a YAML file.
+"""Compute a redirect-level diff between two git refs of YAML file(s).
 
 The engine behind the ``diff-file`` subcommand and the PR-time CI check.
 Reads the YAML at ``base_ref`` and ``head_ref`` via ``git show``, parses
 both through ``parse_text``, and returns a ``Diff`` that describes what
 the PR proposes — no RtD API calls, so the check stays independent of
 external service health and can run on PRs that have no RtD credentials.
+
+Accepts an ordered list of files and composes each ref's set the same way
+``parse_files`` does: earlier files position before later ones, globally
+reindexed. This is how a PR that touches ``master.yaml`` and ``current.yaml``
+gets diffed against the composed live order rather than each file in
+isolation. A single file keeps its authored positions untouched.
 
 Files that don't exist at a given ref (e.g. new file in head, deleted in
 head) are treated as empty so the diff cleanly shows pure adds or pure
@@ -15,11 +21,12 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+from collections.abc import Sequence
 from pathlib import Path
 
 from rtd_redirects.diff import Diff, diff
 from rtd_redirects.model import RedirectSet
-from rtd_redirects.parse import parse_text
+from rtd_redirects.parse import compose, parse_text
 
 
 class GitError(Exception):
@@ -27,7 +34,7 @@ class GitError(Exception):
 
 
 def diff_file(
-    file_path: str | Path,
+    file_paths: str | Path | Sequence[str | Path],
     *,
     base_ref: str = "origin/master",
     head_ref: str = "HEAD",
@@ -42,26 +49,47 @@ def diff_file(
     - ``updates`` lists records the PR modifies in any non-position field,
     - ``reorders`` lists records whose position the PR changes.
 
-    ``file_path`` must be relative to the repo root (git's ``<ref>:<path>``
-    syntax doesn't accept absolute paths). ``repo_path`` selects the
-    repository to query; ``None`` uses the current working directory.
+    ``file_paths`` is a single path or an ordered list of paths, each relative
+    to the repo root (git's ``<ref>:<path>`` syntax doesn't accept absolute
+    paths). Multiple files compose in the given order on both sides before
+    diffing. ``repo_path`` selects the repository to query; ``None`` uses the
+    current working directory.
     """
-    file_path = Path(file_path)
-    base_text = _read_at_ref(file_path, base_ref, repo_path)
-    head_text = _read_at_ref(file_path, head_ref, repo_path)
+    if isinstance(file_paths, (str, Path)):
+        paths = [Path(file_paths)]
+    else:
+        paths = [Path(p) for p in file_paths]
 
-    base_set = (
-        parse_text(base_text, source=f"{base_ref}:{file_path}")
-        if base_text is not None
-        else RedirectSet()
-    )
-    head_set = (
-        parse_text(head_text, source=f"{head_ref}:{file_path}")
-        if head_text is not None
-        else RedirectSet()
-    )
+    base_set = _compose_at_ref(paths, base_ref, repo_path)
+    head_set = _compose_at_ref(paths, head_ref, repo_path)
 
     return diff(head_set, base_set)
+
+
+def _compose_at_ref(
+    paths: Sequence[Path],
+    ref: str,
+    repo_path: str | Path | None,
+) -> RedirectSet:
+    """Parse and compose every path that exists at ``ref`` into one set.
+
+    Paths missing at the ref are skipped (treated as empty), so a file added or
+    deleted by the PR shows as pure adds or deletes. A single present file keeps
+    its authored positions; multiple compose via :func:`compose` in list order.
+    """
+    named: list[tuple[str, RedirectSet]] = []
+    for path in paths:
+        text = _read_at_ref(path, ref, repo_path)
+        if text is None:
+            continue
+        label = f"{ref}:{path}"
+        named.append((label, parse_text(text, source=label)))
+
+    if not named:
+        return RedirectSet()
+    if len(named) == 1:
+        return named[0][1]
+    return compose(named)
 
 
 _MISSING_PATH_MARKERS = (

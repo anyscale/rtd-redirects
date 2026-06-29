@@ -111,6 +111,80 @@ class TestMixed:
         assert [u.source.from_url for u in d.updates] == ["/a.html"]
 
 
+class TestMultiFile:
+    """Ordered composition across refs — the master.yaml + current.yaml case."""
+
+    def _commit_files(self, repo: Path, files: dict[str, str], msg: str) -> str:
+        for name, content in files.items():
+            (repo / name).write_text(dedent(content).lstrip("\n"))
+            _git("add", name, cwd=repo)
+        _git("commit", "-m", msg, cwd=repo)
+        return _git("rev-parse", "HEAD", cwd=repo).stdout.strip()
+
+    def test_change_to_one_file_diffs_against_composed_set(self, repo: Path):
+        master = "schema_version: 1\nredirects: []\n"
+        current = _yaml(_E_A)
+        base = self._commit_files(
+            repo, {"master.yaml": master, "current.yaml": current}, "base",
+        )
+        # Head adds a rule to master.yaml only.
+        master_head = _yaml('from: /m.html\n    to:   /n.html\n    type: exact')
+        head = self._commit_files(repo, {"master.yaml": master_head}, "stage master")
+
+        d = diff_file(
+            ["master.yaml", "current.yaml"],
+            base_ref=base, head_ref=head, repo_path=repo,
+        )
+        # New master rule lands at position 0; current's /a.html shifts to 1.
+        assert [r.from_url for r in d.adds] == ["/m.html"]
+        assert [u.source.from_url for u in d.reorders] == ["/a.html"]
+        assert not d.deletes and not d.updates
+
+    def test_new_master_file_at_head_composes(self, repo: Path):
+        # Base has only current.yaml; head adds master.yaml ahead of it.
+        base = self._commit_files(repo, {"current.yaml": _yaml(_E_A)}, "base")
+        master = _yaml('from: /staged.html\n    to:   /dest.html\n    type: exact')
+        head = self._commit_files(repo, {"master.yaml": master}, "add master")
+
+        d = diff_file(
+            ["master.yaml", "current.yaml"],
+            base_ref=base, head_ref=head, repo_path=repo,
+        )
+        # The staged master rule is the add; /a.html shifts down one position as
+        # the higher-priority master rule composes ahead of it.
+        assert [r.from_url for r in d.adds] == ["/staged.html"]
+        assert [u.source.from_url for u in d.reorders] == ["/a.html"]
+        assert not d.deletes and not d.updates
+
+    def test_composed_order_is_master_before_current(self, repo: Path):
+        """Composing master ahead of current gives the master rule position 0 and
+        shifts current's rule down — RtD insert-and-shift first-match semantics.
+        Staging a master rule is an add of that rule plus a reorder of the
+        current rule it now precedes.
+        """
+        master = _yaml('from: /en/master/x.html\n    to:   /en/master/y.html\n    type: exact')
+        current = _yaml(
+            'from: /old/*\n    to:   /new/:splat\n    type: page',
+        )
+        base = self._commit_files(
+            repo, {"master.yaml": "schema_version: 1\nredirects: []\n",
+                   "current.yaml": current}, "base",
+        )
+        head = self._commit_files(repo, {"master.yaml": master}, "stage master")
+
+        d = diff_file(
+            ["master.yaml", "current.yaml"],
+            base_ref=base, head_ref=head, repo_path=repo,
+        )
+        assert [r.from_url for r in d.adds] == ["/en/master/x.html"]
+        # The master rule lands at position 0; /old/* shifts from 0 to 1.
+        assert d.adds[0].position == 0
+        assert [u.source.from_url for u in d.reorders] == ["/old/*"]
+        reorder = d.reorders[0]
+        assert reorder.target.position == 0 and reorder.source.position == 1
+        assert not d.updates and not d.deletes
+
+
 class TestErrors:
     def test_invalid_ref_raises_git_error(self, repo: Path):
         _commit(repo, "redirects.yaml", _yaml(_E_A))

@@ -152,6 +152,37 @@ class TestPlan:
         assert "+ /new -> /target" in out
         assert "1 add" in out
 
+    def test_multi_file_composes_in_order(
+        self, tmp_path: Path, mock_client: MagicMock, factory,
+        capsys: pytest.CaptureFixture,
+    ):
+        """``--file master.yaml current.yaml`` composes both as one source."""
+        master = _write_yaml(tmp_path / "master.yaml", """
+            schema_version: 1
+            redirects:
+              - from: /en/master/x.html
+                to:   /en/master/y.html
+                type: exact
+        """)
+        current = _write_yaml(tmp_path / "current.yaml", """
+            schema_version: 1
+            redirects:
+              - from: /old/*
+                to:   /new/:splat
+                type: page
+        """)
+        mock_client.list_redirects.return_value = []
+        rc = main(
+            ["plan", "--project", "p", "--file", str(master), str(current)],
+            client_factory=factory,
+        )
+        assert rc == EXIT_OK
+        out = capsys.readouterr().out
+        # Both files' rules show as adds against the empty live project.
+        assert "+ /en/master/x.html" in out
+        assert "+ /old/*" in out
+        assert "2 add" in out
+
 
 class TestDiffFile:
     @pytest.fixture
@@ -180,6 +211,40 @@ class TestDiffFile:
         assert rc == EXIT_OK
         out = capsys.readouterr().out
         assert "0 add, 0 update, 0 delete, 0 reorder" in out
+
+    def test_multi_file_diff_composes(
+        self, repo: Path, factory, capsys: pytest.CaptureFixture,
+    ):
+        """diff-file accepts an ordered file list and composes both sides."""
+        (repo / "master.yaml").write_text("schema_version: 1\nredirects: []\n")
+        (repo / "current.yaml").write_text(
+            "schema_version: 1\nredirects:\n  - from: /a\n    to: /b\n    type: exact\n",
+        )
+        subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+        subprocess.run(
+            ["git", "commit", "-m", "base"], cwd=repo, check=True, capture_output=True,
+        )
+        base = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=repo, check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        (repo / "master.yaml").write_text(
+            "schema_version: 1\nredirects:\n  - from: /m\n    to: /n\n    type: exact\n",
+        )
+        subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+        subprocess.run(
+            ["git", "commit", "-m", "stage"], cwd=repo, check=True, capture_output=True,
+        )
+        rc = main(
+            [
+                "diff-file", "--file", "master.yaml", "current.yaml",
+                "--base", base, "--head", "HEAD", "--repo", str(repo),
+            ],
+            client_factory=factory,
+        )
+        assert rc == EXIT_OK
+        out = capsys.readouterr().out
+        assert "+ /m -> /n" in out
+        assert "1 add" in out
 
 
 class TestApply:
@@ -603,6 +668,83 @@ class TestValidateSubcommand:
             raise RuntimeError("RtD client should not be constructed")
         rc = main(["validate", str(f)], client_factory=poisoned)
         assert rc == EXIT_OK
+
+    def test_composed_flag_catches_cross_file_ordering(
+        self, tmp_path: Path, factory, capsys: pytest.CaptureFixture,
+    ):
+        """--composed validates the ordered composition, catching an ordering
+        error that only exists once the files are composed together.
+
+        Each file is independently well-ordered; the error appears only when the
+        broad wildcard in the first file is composed ahead of the specific rule
+        in the second.
+        """
+        first = _write_yaml(tmp_path / "first.yaml", """
+            schema_version: 1
+            redirects:
+              - from: /en/latest/api/*
+                to:   /en/latest/v2/:splat
+                type: exact
+        """)
+        second = _write_yaml(tmp_path / "second.yaml", """
+            schema_version: 1
+            redirects:
+              - from: /en/latest/api/foo.html
+                to:   /en/latest/v2/foo.html
+                type: exact
+        """)
+        # Per-file: both clean.
+        rc_per_file = main([
+            "validate", str(first), str(second),
+        ], client_factory=factory)
+        assert rc_per_file == EXIT_OK
+        # Composed: the wildcard at position 0 shadows the specific rule.
+        rc = main([
+            "validate", str(first), str(second), "--composed",
+        ], client_factory=factory)
+        assert rc == EXIT_VALIDATION
+        err = capsys.readouterr().err
+        assert "composed" in err
+        assert "ERROR ordering" in err
+
+    def test_composed_clean_set_exits_ok(
+        self, tmp_path: Path, factory, capsys: pytest.CaptureFixture,
+    ):
+        master = _write_yaml(tmp_path / "master.yaml", """
+            schema_version: 1
+            redirects:
+              - from: /en/master/x.html
+                to:   /en/master/y.html
+                type: exact
+        """)
+        current = _write_yaml(tmp_path / "current.yaml", """
+            schema_version: 1
+            redirects:
+              - from: /old/*
+                to:   /new/:splat
+                type: page
+        """)
+        rc = main([
+            "validate", str(master), str(current), "--composed",
+        ], client_factory=factory)
+        assert rc == EXIT_OK
+        assert "ok" in capsys.readouterr().err
+
+    def test_composed_with_fix_is_usage_error(
+        self, tmp_path: Path, factory, capsys: pytest.CaptureFixture,
+    ):
+        f = _write_yaml(tmp_path / "r.yaml", """
+            schema_version: 1
+            redirects:
+              - from: /a
+                to:   /b
+                type: exact
+        """)
+        rc = main([
+            "validate", str(f), "--composed", "--fix",
+        ], client_factory=factory)
+        assert rc != EXIT_OK
+        assert "cannot be combined with --fix" in capsys.readouterr().err
 
 
 class TestErrorHandling:

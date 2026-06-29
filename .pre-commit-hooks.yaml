@@ -3,7 +3,21 @@
   description: >
     Validate redirect YAML files: catches unreachable rules
     (specific-after-general) and chain candidates (A.to overlaps B.from).
-    Runs locally without RtD credentials.
+    Runs locally without RtD credentials. Pre-commit passes only the changed
+    files, so each file is validated independently. Use
+    rtd-redirects-validate-composed to check cross-file ordering.
   entry: rtd-redirects validate
   language: python
   files: \.ya?ml$
+
+- id: rtd-redirects-validate-composed
+  name: rtd-redirects validate --composed
+  description: >
+    Validate the ordered composition of all redirect files as one set, catching
+    cross-file ordering errors (a specific rule in one file shadowed by a broad
+    catch-all in another). Composition needs the complete ordered file list
+    every time, so this hook sets pass_filenames: false and the consumer pins
+    the list via args. Runs locally without RtD credentials.
+  entry: rtd-redirects validate --composed
+  language: python
+  pass_filenames: false
