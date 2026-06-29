@@ -32,8 +32,13 @@ python -m pip install -e .[dev]
 The package publishes to PyPI as `anyscale-rtd-redirects`. The command-line
 entry point remains `rtd-redirects`.
 
-Before the first release, configure a PyPI Trusted Publisher with the following
-values:
+Releases are tag-driven. The version comes from the git tag through
+`setuptools-scm`, so the tag is the only thing you bump. There's no version
+string to edit in the source. Pushing a `v*` tag triggers `publish.yml`, which
+runs the tests, builds the distribution, and publishes to PyPI through a Trusted
+Publisher (OIDC, no stored token).
+
+The PyPI Trusted Publisher is already configured with these values:
 
 | Field | Value |
 |---|---|
@@ -43,7 +48,8 @@ values:
 | Workflow | `publish.yml` |
 | Environment | `pypi` |
 
-To publish a release, complete the following steps:
+To cut a release, complete the following steps. Replace `vX.Y.Z` with the next
+version, for example `v0.2.0`.
 
 1. Verify the test and package checks locally:
 
@@ -58,8 +64,8 @@ To publish a release, complete the following steps:
 1. Create and push a version tag:
 
    ```bash
-   git tag v0.1.0
-   git push origin v0.1.0
+   git tag vX.Y.Z
+   git push origin vX.Y.Z
    ```
 
 1. Confirm the `publish` GitHub Actions workflow succeeds.
@@ -67,7 +73,7 @@ To publish a release, complete the following steps:
 1. Verify the published package from a clean environment:
 
    ```bash
-   python -m pip install anyscale-rtd-redirects==0.1.0
+   python -m pip install anyscale-rtd-redirects==X.Y.Z
    rtd-redirects --help
    ```
 
