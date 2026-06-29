@@ -205,9 +205,51 @@ rtd-redirects apply --project anyscale-ray --file doc/redirects/current.yaml --s
 
 `audit` runs the validator unconditionally and exits non-zero if either drift or validation errors exist (drift is exit 1, validation error is exit 6; validation takes precedence).
 
+#### `--composed` validation across files
+
+By default `validate` checks each file independently — the pre-commit contract, since a pre-commit hook passes every matching file at once. Pass `--composed` to instead validate the *ordered composition* of all files as one redirect set:
+
+```bash
+rtd-redirects validate doc/redirects/master.yaml doc/redirects/current.yaml --composed
+```
+
+This catches ordering errors that exist only after composition — a specific rule in `master.yaml` shadowed by a broad catch-all in `current.yaml`, or the reverse. It needs no RtD credentials, so PR-time CI can run it without API access. `--composed` is incompatible with `--fix`: a composed set can't be unambiguously written back into separate files. Run `--fix` per file first, then `--composed` to check cross-file ordering.
+
 #### Auto-fix caveats
 
 `--fix` rewrites the YAML using the parsed `RedirectSet`, which loses comments and authoring formatting (`schema_version`, `language_prefix`, and `defaults` are preserved). Run `--fix`, review the diff, and commit. The reordering is deterministic — sorted by `(specificity, original position, from_url, type)` — so re-running on a clean file is a no-op.
+
+## Multiple files: ordered composition
+
+`plan`, `apply`, `audit`, and `diff-file` accept an ordered list of `--file` paths and compose them into one source of truth. `validate --composed` runs the same composition through the credential-free validator.
+
+```bash
+rtd-redirects plan --file doc/redirects/master.yaml doc/redirects/current.yaml
+rtd-redirects apply --file doc/redirects/master.yaml doc/redirects/current.yaml --yes
+rtd-redirects diff-file --file doc/redirects/master.yaml doc/redirects/current.yaml \
+    --base origin/master --head HEAD
+```
+
+The composition contract:
+
+- **File order is meaningful.** Every record from an earlier file is positioned before every record from a later file, so an earlier file's rules match first under RtD's strict first-match. Argument order decides this, not how the paths happen to sort.
+- **Positions are reindexed globally.** Each file's local positions start at zero; after concatenation the composed set is reindexed to `0..N-1`. The composed order is explicit, not an artifact of how Python sorted overlapping position values.
+- **Within a file, authored order is preserved.** A file's own `position` values decide its internal order before the global reindex flattens them.
+- **Duplicate identities are rejected across files.** A `(from_url, type)` authored in two files fails just as loudly as one authored twice in a single file, with an error naming both files. (Live RtD duplicates are still tolerated on the read path; this guard is for authored YAML.)
+- **A single `--file` is unchanged.** One file keeps its authored positions untouched — composition and reindexing only apply once there's more than one file.
+
+### Ray use case: `master.yaml` before `current.yaml`
+
+Ray stages next-release redirects in a `master`-scoped file that composes *before* the live `current.yaml`:
+
+```text
+doc/redirects/master.yaml    # /en/master/... rules for the staged next release
+doc/redirects/current.yaml   # live /latest and catch-all/wildcard rules
+```
+
+Composing `master.yaml` first gives its specific `/en/master/...` exact rules lower positions than the broad `page` and wildcard rules in `current.yaml`, so they match first. On release, `master.yaml`'s entries fold into `current.yaml` (their `/en/master/...` destinations become `/en/latest/...`) and `master.yaml` resets empty for the next cycle. The Ray file convention and release-day procedure are tracked separately in the Ray repo.
+
+Because positions are first-match, composing a higher-priority rule ahead of an existing one shifts the existing rule's position down by one. That surfaces as a `reorder` in `plan` / `diff-file`, which is RtD's insert-and-shift semantics working as intended.
 
 ## YAML schema
 
