@@ -139,6 +139,13 @@ Reserve `exact` redirects for cases where you specifically need version-targeted
 - Body explains the *why* and notable design choices.
 - Trailing `Co-Authored-By: Claude Opus 4.7 (1M context)` line when AI-assisted.
 
+### Releasing
+
+- Releases are tag-driven. Push a `vX.Y.Z` tag and `publish.yml` runs the tests, builds, and publishes to PyPI through a Trusted Publisher (OIDC, no stored token).
+- The version comes from the git tag through `setuptools-scm`. The tag is the only thing you bump; there's no version string to edit in the source.
+- Don't expect a merge to `main` to publish. Publishing is a deliberate tag push, not a push-to-`main` side effect.
+- Full procedure (local checks, tag, verify from a clean environment) is in the README `## Release` section.
+
 ## Deferred work
 
 Captured here so it doesn't get lost. Listed in rough priority order.
@@ -146,7 +153,6 @@ Captured here so it doesn't get lost. Listed in rough priority order.
 ### Operational follow-ups (no code work in this repo)
 
 1. **First real `dump` against `anyscale-ray`** — bootstrap the source-of-truth YAML for `ray-project/ray/doc/redirects/current.yaml`. Tracked under [DOC-928](https://anyscale1.atlassian.net/browse/DOC-928).
-1. **PyPI release of `0.1.0`** — publish the distribution as `anyscale-rtd-redirects` so `python -m pip install anyscale-rtd-redirects` works without a clone. Keep the installed CLI command as `rtd-redirects`. Set up a GitHub Actions workflow that builds and publishes on tag.
 1. **Buildkite integration (phase 2)** — PR-time `diff-file` step and merge-time `apply` step in `ray-project/ray/.buildkite/`. Path-filtered to `doc/redirects/**` so it adds no work to Ray's existing test graph. Lives in the Ray repo, not this one.
 1. **Bot-user provisioning handoff** — `anyscale-ray-docs-ops` RtD user provisioned by REEf + IT. Switch from personal admin token to bot-user token in 1Password and Buildkite secrets once landed.
 
