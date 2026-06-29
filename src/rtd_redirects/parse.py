@@ -11,13 +11,21 @@ path-only ``from:`` paired with top-level ``defaults.versions``) are routed to
 The URL language segment (``/en`` for ``docs.ray.io/en/latest/...``) is
 configurable per file via top-level ``language_prefix:``, defaulting to
 ``/en``.
+
+Multiple files compose into one ordered source of truth. ``parse_files`` and
+``compose`` treat file order as meaningful — every record from an earlier file
+is positioned before every record from a later file — and reindex the result
+globally so per-file positions that each start at zero can't produce ambiguous
+ordering. Ray uses this to keep next-release redirects in a ``master``-scoped
+file that composes before the live ``current.yaml``; see ``compose`` and the
+README's multi-file section.
 """
 
 from __future__ import annotations
 
 import re
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -35,7 +43,14 @@ from rtd_redirects.model import (
 
 SCHEMA_VERSION = 1
 
-__all__ = ["ParseError", "SCHEMA_VERSION", "parse_file", "parse_files", "parse_text"]
+__all__ = [
+    "ParseError",
+    "SCHEMA_VERSION",
+    "compose",
+    "parse_file",
+    "parse_files",
+    "parse_text",
+]
 
 
 @dataclass(frozen=True)
@@ -62,25 +77,80 @@ def _duplicate_identity_error(source: Path, r: Redirect) -> ParseError:
     )
 
 
-def parse_files(files: Iterable[Path]) -> RedirectSet:
-    """Parse one or more YAML files into a single ``RedirectSet``.
+def _duplicate_identity_across_files(first: str, second: str, r: Redirect) -> ParseError:
+    """A cross-file duplicate-identity ``ParseError`` naming both sources.
 
-    Files are processed in sorted-by-path order so concatenation is
-    deterministic. Identity collisions across files raise ``ParseError``.
+    The composed (ordered multi-file) analogue of
+    :func:`_duplicate_identity_error`: an identity authored in two files is the
+    same copy-paste mistake as one authored twice in a single file, so
+    composition fails just as loudly and points at both files.
     """
-    rs = RedirectSet()
-    for path in sorted(files, key=str):
-        for r in _parse_file(path):
-            try:
-                rs.add(r)
-            except ValueError as e:
-                raise _duplicate_identity_error(path, r) from e
-    return rs
+    return ParseError(
+        f"duplicate redirect identity {r.identity}: appears in both {first} and "
+        f"{second}. Composed multi-file input must hold one entry per "
+        "(from_url, type) across all files — merge or remove the duplicate. "
+        "(Live RtD data may legitimately contain duplicates; plan, audit, apply, "
+        "and dump tolerate them and keep the lowest-position record.)"
+    )
+
+
+def compose(named_sets: Iterable[tuple[str, RedirectSet]]) -> RedirectSet:
+    """Compose ordered per-file sets into one globally-reindexed ``RedirectSet``.
+
+    File order is meaningful: every record from an earlier file is positioned
+    before every record from a later file, so an earlier file's rules match
+    first under RtD's strict first-match. Within a file, records keep their
+    authored relative order (``RedirectSet`` iterates by ``position``). After
+    concatenation the composed set is reindexed to ``0..N-1`` so per-file
+    positions that each start at zero don't collide — the composed order is
+    explicit, not an artifact of how Python happened to sort overlapping
+    position values.
+
+    ``named_sets`` pairs each set with a human label (a file path, or a
+    ``<ref>:<path>`` string at PR time) used only in the duplicate-identity
+    error. An identity appearing in more than one set raises ``ParseError``
+    naming both labels.
+    """
+    seen: dict[tuple[str, str], str] = {}
+    composed: list[Redirect] = []
+    for label, rs in named_sets:
+        for r in rs:
+            if r.identity in seen:
+                raise _duplicate_identity_across_files(seen[r.identity], label, r)
+            seen[r.identity] = label
+            composed.append(replace(r, position=len(composed)))
+    return RedirectSet(composed)
+
+
+def parse_files(files: Iterable[Path]) -> RedirectSet:
+    """Parse an ordered list of YAML files into a single ``RedirectSet``.
+
+    File order is meaningful and preserved: ``parse_files([master, current])``
+    composes ``master``'s rules before ``current``'s, regardless of how the
+    paths happen to sort. A single file keeps its authored positions untouched;
+    multiple files are composed and globally reindexed via :func:`compose`.
+    Identity collisions — within one file or across files — raise ``ParseError``.
+    """
+    named_sets = [(str(path), _parse_to_set(path)) for path in files]
+    if len(named_sets) == 1:
+        return named_sets[0][1]
+    return compose(named_sets)
 
 
 def parse_file(path: Path) -> RedirectSet:
     """Parse a single YAML file into a ``RedirectSet``."""
     return parse_files([path])
+
+
+def _parse_to_set(path: Path) -> RedirectSet:
+    """Parse one file into its own ``RedirectSet``, failing on in-file duplicates."""
+    rs = RedirectSet()
+    for r in _parse_file(path):
+        try:
+            rs.add(r)
+        except ValueError as e:
+            raise _duplicate_identity_error(path, r) from e
+    return rs
 
 
 def parse_text(text: str, *, source: str | Path = "<input>") -> RedirectSet:

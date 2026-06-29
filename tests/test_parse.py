@@ -7,7 +7,8 @@ from textwrap import dedent
 
 import pytest
 
-from rtd_redirects.parse import ParseError, parse_file, parse_files
+from rtd_redirects.model import Redirect, RedirectSet
+from rtd_redirects.parse import ParseError, compose, parse_file, parse_files
 
 
 def _write(tmp_path: Path, name: str, content: str) -> Path:
@@ -464,7 +465,13 @@ class TestExpansionIntegration:
 
 
 class TestMultiFile:
-    def test_files_concatenate_sorted(self, tmp_path: Path):
+    def test_files_compose_in_argument_order(self, tmp_path: Path):
+        """File order is meaningful: earlier files position before later ones.
+
+        The argument order — not the alphabetical path order — decides the
+        composed sequence. Here ``b.yaml`` is passed first, so its rule lands
+        at position 0 ahead of ``a.yaml``'s.
+        """
         a = _write(tmp_path, "a.yaml", """
             schema_version: 1
             redirects:
@@ -479,8 +486,99 @@ class TestMultiFile:
                 to: /b2
                 type: exact
         """)
-        rs = parse_files([b, a])  # caller order shouldn't matter
-        assert {r.from_url for r in rs} == {"/a1", "/a2"}
+        rs = parse_files([b, a])
+        assert [r.from_url for r in rs] == ["/a2", "/a1"]
+        assert [r.position for r in rs] == [0, 1]
+
+    def test_composition_reindexes_local_positions(self, tmp_path: Path):
+        """Each file's local positions start at zero; composition reindexes
+        globally so the second file's records can't tie the first file's.
+
+        Without a global reindex both files would contribute a position-0 and a
+        position-1 record and the composed order would be an artifact of how
+        Python's stable sort broke the ties. The reindex makes file order
+        decide it.
+        """
+        first = _write(tmp_path, "first.yaml", """
+            schema_version: 1
+            redirects:
+              - from: /first/a
+                to:   /x
+                type: exact
+              - from: /first/b
+                to:   /y
+                type: exact
+        """)
+        second = _write(tmp_path, "second.yaml", """
+            schema_version: 1
+            redirects:
+              - from: /second/a
+                to:   /p
+                type: exact
+              - from: /second/b
+                to:   /q
+                type: exact
+        """)
+        rs = parse_files([first, second])
+        assert [r.from_url for r in rs] == [
+            "/first/a", "/first/b", "/second/a", "/second/b",
+        ]
+        assert [r.position for r in rs] == [0, 1, 2, 3]
+
+    def test_master_specific_exact_composes_before_current_wildcard(
+        self, tmp_path: Path,
+    ):
+        """Ray's load-bearing case: a ``master``-scoped exact rule must position
+        before the broad ``current.yaml`` wildcard/page rules so it matches
+        first under RtD strict first-match.
+        """
+        master = _write(tmp_path, "master.yaml", """
+            schema_version: 1
+            redirects:
+              - from: /en/master/api/special_case.html
+                to:   /en/master/api/its_new_home.html
+                type: exact
+        """)
+        current = _write(tmp_path, "current.yaml", """
+            schema_version: 1
+            redirects:
+              - from: /api/old/*
+                to:   /api/new/:splat
+                type: page
+              - from: /en/master/*
+                to:   /en/latest/:splat
+                type: exact
+        """)
+        rs = parse_files([master, current])
+        ordered = [(r.from_url, r.position) for r in rs]
+        assert ordered == [
+            ("/en/master/api/special_case.html", 0),
+            ("/api/old/*", 1),
+            ("/en/master/*", 2),
+        ]
+        # The specific master rule sits at the lowest position, ahead of the
+        # broad page and wildcard rules it would otherwise be shadowed by.
+        positions = {r.from_url: r.position for r in rs}
+        assert positions["/en/master/api/special_case.html"] < positions["/en/master/*"]
+
+    def test_single_file_keeps_authored_positions(self, tmp_path: Path):
+        """A lone file is not reindexed — its authored positions are the source
+        of truth, matching ``parse_file``.
+        """
+        f = _write(tmp_path, "r.yaml", """
+            schema_version: 1
+            redirects:
+              - from: /a
+                to:   /b
+                type: exact
+                position: 5
+              - from: /c
+                to:   /d
+                type: exact
+                position: 9
+        """)
+        rs = parse_files([f])
+        assert [r.position for r in rs] == [5, 9]
 
     def test_duplicate_identity_across_files_raises(self, tmp_path: Path):
         a = _write(tmp_path, "a.yaml", """
@@ -499,6 +597,29 @@ class TestMultiFile:
         """)
         with pytest.raises(ParseError, match="duplicate redirect identity"):
             parse_files([a, b])
+
+    def test_cross_file_duplicate_message_names_both_files(self, tmp_path: Path):
+        """A cross-file collision points at both files and the offending identity."""
+        a = _write(tmp_path, "a.yaml", """
+            schema_version: 1
+            redirects:
+              - from: /dup
+                to: /one
+                type: exact
+        """)
+        b = _write(tmp_path, "b.yaml", """
+            schema_version: 1
+            redirects:
+              - from: /dup
+                to: /two
+                type: exact
+        """)
+        with pytest.raises(ParseError) as exc:
+            parse_files([a, b])
+        msg = str(exc.value)
+        assert "('/dup', 'exact')" in msg
+        assert str(a) in msg and str(b) in msg
+        assert "merge or remove" in msg
 
     def test_duplicate_identity_message_names_resolution(self, tmp_path: Path):
         """AC-1: authored-YAML duplicates fail with a clear remediation message."""
@@ -536,3 +657,57 @@ class TestMultiFile:
         """)
         rs = parse_files([a, b])
         assert len(rs) == 2
+
+
+class TestCompose:
+    """Direct unit tests for the compose primitive (parse.compose)."""
+
+    def _set(self, *specs: tuple[str, int]) -> RedirectSet:
+        return RedirectSet(
+            Redirect(from_url=f, to_url="/dest", type="exact", position=p)
+            for f, p in specs
+        )
+
+    def test_reindexes_dense_in_file_then_record_order(self):
+        """Composed positions are dense 0..N-1 in file-then-record order,
+        regardless of each file's local position values.
+        """
+        first = self._set(("/a", 0), ("/b", 1))
+        second = self._set(("/c", 0), ("/d", 1))
+        composed = compose([("first", first), ("second", second)])
+        assert [(r.from_url, r.position) for r in composed] == [
+            ("/a", 0), ("/b", 1), ("/c", 2), ("/d", 3),
+        ]
+
+    def test_within_file_order_follows_position(self):
+        """A file's own position values decide its internal order before the
+        global reindex flattens them.
+        """
+        only = self._set(("/late", 9), ("/early", 2))
+        composed = compose([("only", only)])
+        assert [(r.from_url, r.position) for r in composed] == [
+            ("/early", 0), ("/late", 1),
+        ]
+
+    def test_idempotent_on_already_composed_set(self):
+        """Re-composing a composed set is a no-op: positions are already dense
+        and in order, so the output is byte-stable.
+        """
+        composed = compose([
+            ("first", self._set(("/a", 0))),
+            ("second", self._set(("/b", 0))),
+        ])
+        again = compose([("recomposed", composed)])
+        assert [(r.from_url, r.position) for r in composed] == [("/a", 0), ("/b", 1)]
+        assert [(r.from_url, r.position) for r in again] == [("/a", 0), ("/b", 1)]
+
+    def test_cross_set_duplicate_raises_with_labels(self):
+        dup = ("/x", 0)
+        with pytest.raises(ParseError) as exc:
+            compose([("left", self._set(dup)), ("right", self._set(dup))])
+        msg = str(exc.value)
+        assert "('/x', 'exact')" in msg
+        assert "left" in msg and "right" in msg
+
+    def test_empty_input_yields_empty_set(self):
+        assert len(compose([])) == 0
