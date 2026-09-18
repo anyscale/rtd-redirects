@@ -25,6 +25,20 @@ The chain detector uses literal-prefix matching on ``to_url`` (stripping
 substitution would actually produce a URL outside the target rule's match
 set. False positives are easy to dismiss; false negatives would silently
 let chains slip through, which is the worse failure mode.
+
+Chain candidates are tiered by whether the author can act on them. ``force``
+defaults to ``false`` on RtD, so B only fires when A's target would itself
+404. When B is a broad wildcard catch-all that lands on a fixed page (its
+``to`` has no ``:splat``), the overlap is **benign**: on versions where A's
+target exists there's no chain, and on versions where it 404s the catch-all
+is the intended graceful-degradation fallback — a prefix catch-all can't be
+pointed past, so there's no rewrite that removes the overlap. These emit at
+``info``. A candidate where B is a *specific* rule, or a path-preserving
+wildcard move (B's ``to`` carries ``:splat``), would send A's target to a
+*different* destination the author should route to directly; those stay
+``warning``. The tiering is structural and offline; it doesn't prove A's
+target resolves to a live page, so a ``warning`` is the actionable signal and
+``info`` is a note, not a guarantee.
 """
 
 from __future__ import annotations
@@ -37,7 +51,7 @@ from typing import Literal
 from rtd_redirects.expand import DEFAULT_LANGUAGE_PREFIX, is_external
 from rtd_redirects.model import URL_STYLE_TYPES, Redirect, RedirectSet
 
-Severity = Literal["error", "warning"]
+Severity = Literal["error", "warning", "info"]
 Kind = Literal["ordering", "chain"]
 
 
@@ -258,7 +272,24 @@ def _check_chains(
         for b, pb in zip(rules, patterns, strict=True):
             if pb is None or b.identity == a.identity:
                 continue
-            if _patterns_overlap(target, pb):
+            if not _patterns_overlap(target, pb):
+                continue
+            if _is_benign_catchall_overlap(target, b, pb):
+                findings.append(Finding(
+                    severity="info",
+                    kind="chain",
+                    message=(
+                        f"'{a.from_url}' redirects to '{a.to_url}', which falls "
+                        f"under the fixed-page catch-all '{b.from_url}' "
+                        f"({b.type}). Benign: force=false means the catch-all "
+                        f"fires only if '{a.to_url}' 404s, and a prefix "
+                        f"catch-all can't be pointed past. It chains only on "
+                        f"versions where '{a.to_url}' itself 404s, where the "
+                        f"catch-all is the intended fallback."
+                    ),
+                    rules=(a, b),
+                ))
+            else:
                 findings.append(Finding(
                     severity="warning",
                     kind="chain",
@@ -271,6 +302,34 @@ def _check_chains(
                     rules=(a, b),
                 ))
     return findings
+
+
+def _is_benign_catchall_overlap(
+    target: _Pattern,
+    b: Redirect,
+    pb: _Pattern,
+) -> bool:
+    """True iff A's ``target`` overlaps B only as a fixed-page catch-all.
+
+    Benign means: B is a broad wildcard rule (``pb.has_wildcard``) that lands
+    every match on one fixed page (B's ``to`` has no ``:splat``), and B's match
+    set contains all of A's target. Because ``force`` defaults to ``false``, B
+    fires only when A's target would 404, and a prefix catch-all is
+    unavoidable, so there's no rewrite of A that removes the overlap — on
+    versions where A's target exists there's no chain, and where it 404s the
+    catch-all is the intended fallback.
+
+    A specific (non-wildcard) B, or a path-preserving wildcard move whose
+    ``to`` carries ``:splat``, is *not* benign: it would route A's target to a
+    different destination, which the author should point at directly.
+    """
+    if not pb.has_wildcard:
+        return False
+    if ":splat" in b.to_url:
+        return False
+    return _version_subset(target.version, pb.version) and _path_subset(
+        target.prefix, target.has_wildcard, pb.prefix, pb.has_wildcard
+    )
 
 
 def _target_pattern(to_url: str, language_prefix: str) -> _Pattern | None:

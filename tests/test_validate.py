@@ -204,6 +204,58 @@ class TestChainFindings:
         findings = [f for f in validate(rs) if f.kind == "chain"]
         assert findings == []
 
+    def test_direct_specific_chain_is_warning(self):
+        # A.to matches a *specific* rule's from: a real chain the author can
+        # collapse by pointing directly at the final destination.
+        rs = RedirectSet([
+            _r("/old.html", "/intermediate.html", type="page", position=0),
+            _r("/intermediate.html", "/current.html", type="page", position=1),
+        ])
+        findings = [f for f in validate(rs) if f.kind == "chain"]
+        assert findings
+        assert all(f.severity == "warning" for f in findings)
+
+    def test_specific_target_under_fixed_catchall_is_info(self):
+        # A.to is a real page that merely lands under a broad wildcard catch-all
+        # whose target is a fixed page (no :splat). force=false means the
+        # catch-all only fires if A.to 404s, and it can't be pointed past —
+        # benign, so it emits at info, not warning.
+        rs = RedirectSet([
+            _r("/ray-logging.html", "/observability/configure.html",
+               type="page", position=0),
+            _r("/observability/*", "/observability/index.html",
+               type="page", position=1),
+        ])
+        findings = [f for f in validate(rs) if f.kind == "chain"]
+        assert len(findings) == 1
+        assert findings[0].severity == "info"
+
+    def test_splat_move_into_fixed_catchall_is_info(self):
+        # A path-preserving move (/api_docs/* -> /api/:splat) whose splatted
+        # result lands under a fixed-page catch-all (/api/* -> /api/index.html)
+        # is the same benign shape: it only fires when the moved path 404s.
+        rs = RedirectSet([
+            _r("/api_docs/*", "/api/:splat", type="page", position=0),
+            _r("/api/*", "/api/index.html", type="page", position=1),
+        ])
+        findings = [f for f in validate(rs) if f.kind == "chain"]
+        assert len(findings) == 1
+        assert findings[0].severity == "info"
+
+    def test_path_preserving_move_into_wildcard_is_warning(self):
+        # A move into a catch-all that *itself* preserves the path (:splat in
+        # its target) is a genuine move-of-a-move: it rewrites A.to to a
+        # different destination, so it stays a warning.
+        rs = RedirectSet([
+            _r("/old/*", "/mid/:splat", type="page", position=0),
+            _r("/mid/*", "/new/:splat", type="page", position=1),
+        ])
+        findings = [f for f in validate(rs) if f.kind == "chain"]
+        assert any(
+            f.severity == "warning" and "/old/*" in f.message for f in findings
+        )
+        assert all(f.severity != "info" for f in findings)
+
 
 class TestDeterminism:
     def test_findings_are_byte_stable_across_runs(self):
