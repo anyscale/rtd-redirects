@@ -36,7 +36,7 @@ The MVP is ~1000 LOC across nine modules. Each is documented at the top of the f
 | `diff.py` | `Diff` of two `RedirectSet`s. Categories: adds / updates / deletes / reorders. |
 | `diff_file.py` | Git-only PR-time diff. Reads YAML at two refs via `git show`, runs each through `parse_text`, returns a `Diff`. No API. |
 | `apply.py` | Drives a `Diff` against `RtdClient` in safe order: deletes → adds → updates → reorders. Per-entry stderr audit log. |
-| `validate.py` | Rules-based ordering and chain detection over a `RedirectSet`. Flags unreachable rules (specific-with-higher-position-than-general) as errors, and chain candidates (A.to matches B.from) tiered by actionability: `warning` when B is a specific rule or a path-preserving wildcard move (`:splat` in B.to), `info` when B is a fixed-page catch-all the author can't route past. |
+| `validate.py` | Rules-based ordering and chain detection over a `RedirectSet`. Flags unreachable rules (specific-with-higher-position-than-general) as errors, and chain candidates (A.to matches B.from) tiered by actionability: `warning` for an overlap with a specific rule or a `:splat` move, `info` for a fixed-page catch-all or a preempted splat target. |
 | `cli.py` | `argparse` entry point. Wires seven subcommands: `list`, `dump`, `plan`, `diff-file`, `apply`, `audit`, `validate`. Validation runs always on `audit` and `validate`, and on `plan` / `apply` with `--strict`. |
 
 ## Key design choices
@@ -77,7 +77,7 @@ RtD's current v3 API supports exactly four redirect types. Our `model.REDIRECT_T
 
 **Inactive versions and slug renames**: deactivating a version on RtD deletes its artifacts and serves 404 for its URLs. Slug renames have the same effect on old-slug URLs. Because `force: false` is the default and redirects fire on 404, both events automatically route the affected URLs through any matching wildcard or page redirect. This is a feature, not a bug — designers can defer "what happens to legacy version URLs" until they're ready to deactivate.
 
-**Chains**: RtD doesn't promise chain resolution. If `/a → /b` and `/b → /c` are configured, the browser follows both 3xx, so author each `from` pointing at the *final* `to`. `validate.py` tiers chain candidates: an overlap with a *specific* rule or a `:splat` wildcard move is a `warning`; an overlap with a broad fixed-page catch-all is `info` (with `force: false` it fires only on a 404, and a catch-all can't be pointed past). `validate --show-info` lists the info detail.
+**Chains**: RtD doesn't resolve chains server-side. If `/a → /b` and `/b → /c` are configured, the browser follows both 3xx, so author each `from` at the *final* `to`. `validate.py` tiers candidates: an overlap with a *specific* rule or a `:splat` move is `warning`; a fixed-page catch-all (fires only on a 404, can't be pointed past) or a splat a lower-position rule preempts is `info`. `validate --show-info` lists info detail.
 
 ### Local validation and pre-commit
 
