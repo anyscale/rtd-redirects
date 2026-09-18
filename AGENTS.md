@@ -36,7 +36,7 @@ The MVP is ~1000 LOC across nine modules. Each is documented at the top of the f
 | `diff.py` | `Diff` of two `RedirectSet`s. Categories: adds / updates / deletes / reorders. |
 | `diff_file.py` | Git-only PR-time diff. Reads YAML at two refs via `git show`, runs each through `parse_text`, returns a `Diff`. No API. |
 | `apply.py` | Drives a `Diff` against `RtdClient` in safe order: deletes → adds → updates → reorders. Per-entry stderr audit log. |
-| `validate.py` | Rules-based ordering and chain detection over a `RedirectSet`. Flags unreachable rules (specific-with-higher-position-than-general) and chain candidates (A.to matches B.from). |
+| `validate.py` | Rules-based ordering and chain detection over a `RedirectSet`. Flags unreachable rules (specific-with-higher-position-than-general) as errors, and chain candidates (A.to matches B.from) tiered by actionability: `warning` when B is a specific rule or a path-preserving wildcard move (`:splat` in B.to), `info` when B is a fixed-page catch-all the author can't route past. |
 | `cli.py` | `argparse` entry point. Wires seven subcommands: `list`, `dump`, `plan`, `diff-file`, `apply`, `audit`, `validate`. Validation runs always on `audit` and `validate`, and on `plan` / `apply` with `--strict`. |
 
 ## Key design choices
@@ -77,7 +77,7 @@ RtD's current v3 API supports exactly four redirect types. Our `model.REDIRECT_T
 
 **Inactive versions and slug renames**: deactivating a version on RtD deletes its artifacts and serves 404 for its URLs. Slug renames have the same effect on old-slug URLs. Because `force: false` is the default and redirects fire on 404, both events automatically route the affected URLs through any matching wildcard or page redirect. This is a feature, not a bug — designers can defer "what happens to legacy version URLs" until they're ready to deactivate.
 
-**Chains**: RtD doesn't promise server-side chain resolution. If `/a → /b` and `/b → /c` are configured, the browser follows both 3xx responses. Author each `from` pointing at the *final* `to`. RtD's infinite-redirect detector returns 404 as a failsafe but isn't a substitute for clean authoring. Today's `validate.py` flags chain candidates as warnings.
+**Chains**: RtD doesn't promise chain resolution. If `/a → /b` and `/b → /c` are configured, the browser follows both 3xx, so author each `from` pointing at the *final* `to`. `validate.py` tiers chain candidates: an overlap with a *specific* rule or a `:splat` wildcard move is a `warning`; an overlap with a broad fixed-page catch-all is `info` (with `force: false` it fires only on a 404, and a catch-all can't be pointed past). `validate --show-info` lists the info detail.
 
 ### Local validation and pre-commit
 
@@ -173,7 +173,7 @@ Captured here so it doesn't get lost. Listed in rough priority order.
 1. **Validator follow-ups**. The first cut of `validate.py` covers ordering (specific-must-come-first) and chain candidates (A.to overlaps B.from). Future work that builds on the same Pattern machinery:
    - **Cycle detection** — A.to matches B.from, B.to matches A.from. Today this surfaces as two separate chain findings; a cycle-aware pass could flag the loop explicitly so the operator sees it as one finding instead of N.
    - **Wildcard `*` placement** — RtD rejects prefix and infix wildcards. Today the API returns the error at apply time; the validator could catch it at parse time with a clearer message.
-   - **Splat-substitution precision** — chain detection treats `:splat` conservatively (literal-prefix match). A more precise model would resolve the actual substituted URL against B's pattern; trade-off is more code for fewer false positives.
+   - **Per-URL chain precision** — candidates are already tiered `warning` vs `info` by whether B is actionable or a benign fixed-page catch-all, clearing most false positives offline. Still open: resolving the substituted `:splat` URL against B's pattern, and confirming A's target is a live page via an opt-in oracle (a live check would break the offline contract).
    - **Multiple language prefixes** — when a project hosts multiple language variants, the validator should accept a list of language prefixes or resolve them from the YAML's per-file `language_prefix:`. Today it takes a single prefix.
 1. **Source-file + line tracking on `Redirect`** — design.md asks `apply` to log per-entry with "source YAML file and line number". Currently `apply` only logs the URL. Adding requires `source_file: Path | None` and `source_line: int | None` fields on `Redirect` (with `compare=False`), populated by `parse` and `expand`, surfaced by `apply` log lines.
 1. **Flask integration test fixture** — design.md mentions a `pytest` fixture with a Flask server that models the v3 API. Currently we only have unit tests with mocks. Worth adding once a real apply hits an edge the mocks didn't cover.

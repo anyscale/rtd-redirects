@@ -192,6 +192,12 @@ def _build_parser() -> argparse.ArgumentParser:
              "(earlier files match first) instead of each file independently. "
              "Catches cross-file ordering errors. Incompatible with --fix.",
     )
+    p_validate.add_argument(
+        "--show-info", action="store_true",
+        help="List the per-rule detail for benign chain notes (info findings), "
+             "which are otherwise summarized as a count so actionable warnings "
+             "stand out.",
+    )
 
     return parser
 
@@ -389,7 +395,7 @@ def _cmd_validate(args: argparse.Namespace, *, client_factory: ClientFactory) ->
 
         if findings:
             print(f"\n{path}:", file=sys.stderr)
-            _print_findings(findings, file=sys.stderr)
+            _print_findings(findings, file=sys.stderr, show_info=args.show_info)
             if any(f.severity == "error" for f in findings):
                 exit_code = EXIT_VALIDATION
         else:
@@ -413,7 +419,7 @@ def _cmd_validate_composed(args: argparse.Namespace) -> int:
     label = " + ".join(args.files)
     if findings:
         print(f"\ncomposed ({label}):", file=sys.stderr)
-        _print_findings(findings, file=sys.stderr)
+        _print_findings(findings, file=sys.stderr, show_info=args.show_info)
         if any(f.severity == "error" for f in findings):
             return EXIT_VALIDATION
     else:
@@ -474,17 +480,41 @@ def _print_duplicate_groups(
         )
 
 
-def _print_findings(findings: list[Finding], *, file: TextIO | None = None) -> None:
-    """Render validation findings one per line. Empty input produces no output."""
+def _print_findings(
+    findings: list[Finding],
+    *,
+    file: TextIO | None = None,
+    show_info: bool = False,
+) -> None:
+    """Render validation findings one per line. Empty input produces no output.
+
+    ``error`` and ``warning`` findings always print. ``info`` findings (benign
+    chain notes) are counted in the summary but their per-line detail is hidden
+    unless ``show_info`` is set, so an actionable ``warning`` isn't buried under
+    a wall of benign notes.
+    """
     if file is None:
         file = sys.stderr
     if not findings:
         return
     errors = sum(1 for f in findings if f.severity == "error")
     warnings = sum(1 for f in findings if f.severity == "warning")
-    print(f"\nvalidate: {errors} error, {warnings} warning", file=file)
+    infos = sum(1 for f in findings if f.severity == "info")
+    print(
+        f"\nvalidate: {errors} error, {warnings} warning, {infos} info",
+        file=file,
+    )
     for f in findings:
+        if f.severity == "info" and not show_info:
+            continue
         print(f"  {f.severity.upper()} {f.kind}: {f.message}", file=file)
+    if infos and not show_info:
+        note = "note" if infos == 1 else "notes"
+        print(
+            f"  ({infos} benign chain {note} hidden; "
+            f"run 'validate --show-info' to list them)",
+            file=file,
+        )
 
 
 def _print_diff(d: Diff, *, file: TextIO | None = None) -> None:
