@@ -171,14 +171,18 @@ rtd-redirects validate doc/redirects/current.yaml
 # Multiple files (pre-commit passes them this way)
 rtd-redirects validate doc/redirects/*.yaml
 
-# Auto-fix ordering errors in place (chains are left as warnings)
+# Auto-fix ordering errors in place (chains are left for the author)
 rtd-redirects validate doc/redirects/current.yaml --fix
+
+# List the per-rule detail for benign chain notes (info), otherwise summarized
+rtd-redirects validate doc/redirects/current.yaml --show-info
 ```
 
-Two finding kinds:
+Findings come in three severities:
 
-- **`ERROR ordering`** — rule A's match set is a strict subset of rule B's, but A's position is higher. B fires first; A is unreachable. Lower A's position so it comes before B. `--fix` reorders deterministically.
-- **`WARNING chain`** — rule A's `to` could match rule B's `from`. A request would 3xx to A.to and the browser would follow to B for another 3xx. Rewrite A's `to` to point directly at the final destination. Not auto-fixed (requires choosing the right destination).
+- **`ERROR ordering`** — rule A's match set is a strict subset of rule B's, but A's position is higher. B fires first; A is unreachable. Lower A's position so it comes before B. `--fix` reorders deterministically. Errors fail `--strict` and the pre-commit hook.
+- **`WARNING chain`** — rule A's `to` could match a *specific* rule B, or a path-preserving wildcard move (B's `to` carries `:splat`). B would send A's target elsewhere, so the request chains: a 3xx to A.to, then another to B. Rewrite A's `to` to point at the final destination. Not auto-fixed.
+- **`INFO chain`** — a benign overlap that can't actually chain: either A's target lands under a broad fixed-page catch-all (`force: false` fires it only on a 404, and a catch-all can't be pointed past), or A is a `:splat` move a lower-position rule preempts from ever reaching B. Summarized as a count so a real `WARNING` isn't buried; `--show-info` lists them. Never fails `--strict`.
 
 Validation is rules-based and decidable in closed form because RtD's pattern surface is intentionally narrow (suffix `*` only, four redirect types, no embedded wildcards). URL-style types (`clean_url_to_html` / `html_to_clean_url`) are excluded since they have no `from` URL to compare.
 

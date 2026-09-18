@@ -600,6 +600,45 @@ class TestValidateSubcommand:
         err = capsys.readouterr().err
         assert "ERROR ordering" in err
 
+    def test_benign_chain_is_info_and_hidden_by_default(
+        self, tmp_path: Path, factory, capsys: pytest.CaptureFixture,
+    ):
+        f = _write_yaml(tmp_path / "r.yaml", """
+            schema_version: 1
+            redirects:
+              - from: /ray-logging.html
+                to:   /observability/configure.html
+                type: page
+              - from: /observability/*
+                to:   /observability/index.html
+                type: page
+        """)
+        rc = main(["validate", str(f)], client_factory=factory)
+        assert rc == EXIT_OK  # info findings don't fail validation
+        err = capsys.readouterr().err
+        assert "0 error, 0 warning, 1 info" in err
+        assert "INFO chain" not in err  # per-line detail suppressed
+        assert "benign chain note hidden" in err
+
+    def test_show_info_lists_benign_chain_detail(
+        self, tmp_path: Path, factory, capsys: pytest.CaptureFixture,
+    ):
+        f = _write_yaml(tmp_path / "r.yaml", """
+            schema_version: 1
+            redirects:
+              - from: /ray-logging.html
+                to:   /observability/configure.html
+                type: page
+              - from: /observability/*
+                to:   /observability/index.html
+                type: page
+        """)
+        rc = main(["validate", str(f), "--show-info"], client_factory=factory)
+        assert rc == EXIT_OK
+        err = capsys.readouterr().err
+        assert "INFO chain" in err
+        assert "hidden" not in err
+
     def test_multiple_files(
         self, tmp_path: Path, factory, capsys: pytest.CaptureFixture,
     ):
