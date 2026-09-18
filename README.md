@@ -182,7 +182,7 @@ Findings come in three severities:
 
 - **`ERROR ordering`** — rule A's match set is a strict subset of rule B's, but A's position is higher. B fires first; A is unreachable. Lower A's position so it comes before B. `--fix` reorders deterministically. Errors fail `--strict` and the pre-commit hook.
 - **`WARNING chain`** — rule A's `to` could match a *specific* rule B, or a path-preserving wildcard move (B's `to` carries `:splat`). B would send A's target elsewhere, so the request chains: a 3xx to A.to, then another to B. Rewrite A's `to` to point at the final destination. Not auto-fixed.
-- **`INFO chain`** — A's target merely lands under a broad fixed-page catch-all (B's `to` has no `:splat`). With `force: false` the catch-all fires only if A's target 404s, and a prefix catch-all can't be pointed past, so it's benign. Summarized as a count so a real `WARNING` isn't buried; `--show-info` lists them. Never fails `--strict`.
+- **`INFO chain`** — a benign overlap that can't actually chain: either A's target lands under a broad fixed-page catch-all (`force: false` fires it only on a 404, and a catch-all can't be pointed past), or A is a `:splat` move a lower-position rule preempts from ever reaching B. Summarized as a count so a real `WARNING` isn't buried; `--show-info` lists them. Never fails `--strict`.
 
 Validation is rules-based and decidable in closed form because RtD's pattern surface is intentionally narrow (suffix `*` only, four redirect types, no embedded wildcards). URL-style types (`clean_url_to_html` / `html_to_clean_url`) are excluded since they have no `from` URL to compare.
 

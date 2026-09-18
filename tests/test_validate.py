@@ -242,6 +242,31 @@ class TestChainFindings:
         assert len(findings) == 1
         assert findings[0].severity == "info"
 
+    def test_preempted_splat_overlap_is_info(self):
+        # A's splat could reach specific B (/mid/foo.html), but the only source
+        # that drives it there (/old/foo.html) has its own lower-position rule,
+        # so A never fires for it. The overlap can't chain -> info.
+        rs = RedirectSet([
+            _r("/old/foo.html", "/final.html", type="page", position=0),
+            _r("/old/*", "/mid/:splat", type="page", position=1),
+            _r("/mid/foo.html", "/somewhere.html", type="page", position=2),
+        ])
+        findings = [f for f in validate(rs) if f.kind == "chain"]
+        assert len(findings) == 1
+        assert findings[0].severity == "info"
+        assert "preempts" in findings[0].message
+
+    def test_unpreempted_splat_overlap_stays_warning(self):
+        # Same shape, but no source rule for /old/foo.html: A does fire there
+        # and genuinely chains through B -> warning.
+        rs = RedirectSet([
+            _r("/old/*", "/mid/:splat", type="page", position=0),
+            _r("/mid/foo.html", "/somewhere.html", type="page", position=1),
+        ])
+        findings = [f for f in validate(rs) if f.kind == "chain"]
+        assert any(f.severity == "warning" for f in findings)
+        assert all(f.severity != "info" for f in findings)
+
     def test_path_preserving_move_into_wildcard_is_warning(self):
         # A move into a catch-all that *itself* preserves the path (:splat in
         # its target) is a genuine move-of-a-move: it rewrites A.to to a

@@ -36,9 +36,13 @@ pointed past, so there's no rewrite that removes the overlap. These emit at
 ``info``. A candidate where B is a *specific* rule, or a path-preserving
 wildcard move (B's ``to`` carries ``:splat``), would send A's target to a
 *different* destination the author should route to directly; those stay
-``warning``. The tiering is structural and offline; it doesn't prove A's
-target resolves to a live page, so a ``warning`` is the actionable signal and
-``info`` is a note, not a guarantee.
+``warning``. The exception is a *preempted splat*: when A is a ``/P/* ->
+/Q/:splat`` move and B is a specific ``/Q/<tail>``, the only source that drives
+A into B is ``/P/<tail>``; if a lower-position rule already matches that
+source, A never fires there, so the overlap can't chain and emits ``info``.
+The tiering is structural and offline; it doesn't prove A's target resolves to
+a live page, so a ``warning`` is the actionable signal and ``info`` is a note,
+not a guarantee.
 """
 
 from __future__ import annotations
@@ -289,19 +293,70 @@ def _check_chains(
                     ),
                     rules=(a, b),
                 ))
-            else:
+                continue
+            source = _preempted_splat_source(a, pa, target, pb, rules, patterns)
+            if source is not None:
                 findings.append(Finding(
-                    severity="warning",
+                    severity="info",
                     kind="chain",
                     message=(
-                        f"'{a.from_url}' redirects to '{a.to_url}' which may "
-                        f"match '{b.from_url}' ({b.type}) — request would "
-                        f"chain client-side. Rewrite '{a.from_url}' to point "
-                        f"directly at the final destination."
+                        f"'{a.from_url}' redirects to '{a.to_url}', whose splat "
+                        f"could reach '{b.from_url}' ({b.type}) for source "
+                        f"'{source}'. Benign: a lower-position rule preempts "
+                        f"'{a.from_url}' for '{source}', so '{a.from_url}' never "
+                        f"produces that target and the chain can't fire."
                     ),
                     rules=(a, b),
                 ))
+                continue
+            findings.append(Finding(
+                severity="warning",
+                kind="chain",
+                message=(
+                    f"'{a.from_url}' redirects to '{a.to_url}' which may "
+                    f"match '{b.from_url}' ({b.type}) — request would "
+                    f"chain client-side. Rewrite '{a.from_url}' to point "
+                    f"directly at the final destination."
+                ),
+                rules=(a, b),
+            ))
     return findings
+
+
+def _preempted_splat_source(
+    a: Redirect,
+    pa: _Pattern,
+    target: _Pattern,
+    pb: _Pattern,
+    rules: list[Redirect],
+    patterns: list[_Pattern | None],
+) -> str | None:
+    """Source path for an A→B splat overlap that a lower-position rule preempts.
+
+    When A is a splat move (``/P/* -> /Q/:splat``) and B is a *specific* rule
+    ``/Q/<tail>``, the only request that would drive A into B is ``/P/<tail>``.
+    A fires there only if no earlier rule matches it. If a rule at a lower
+    ``position`` than A already matches ``/P/<tail>`` across all versions A
+    covers, A never produces B's ``from`` and the chain can't fire.
+
+    Returns the reconstructed source path when preempted, else ``None``. Only
+    handles the page-wildcard case; ``exact`` (single-version) preemptors are
+    ignored so a per-version gap isn't hidden.
+    """
+    if not pa.has_wildcard or ":splat" not in a.to_url:
+        return None
+    if pb.has_wildcard:
+        return None  # B is itself broad; not a specific-target overlap
+    if not pb.prefix.startswith(target.prefix):
+        return None
+    splat_value = pb.prefix[len(target.prefix):]
+    source = _Pattern(version="*", prefix=pa.prefix + splat_value, has_wildcard=False)
+    for c, pc in zip(rules, patterns, strict=True):
+        if pc is None or c.identity == a.identity or c.position >= a.position:
+            continue
+        if source == pc or _is_strict_subset(source, pc):
+            return source.prefix
+    return None
 
 
 def _is_benign_catchall_overlap(
