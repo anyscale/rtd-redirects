@@ -178,7 +178,7 @@ rtd-redirects validate doc/redirects/current.yaml --fix
 Two finding kinds:
 
 - **`ERROR ordering`** — rule A's match set is a strict subset of rule B's, but A's position is higher. B fires first; A is unreachable. Lower A's position so it comes before B. `--fix` reorders deterministically.
-- **`WARNING chain`** — rule A's `to` could match rule B's `from`. A request would 3xx to A.to and the browser would follow to B for another 3xx. Rewrite A's `to` to point directly at the final destination. Not auto-fixed (requires choosing the right destination).
+- **`WARNING chain`** — rule A's `to` could match rule B's `from`. A request would 3xx to A.to and the browser would follow to B for another 3xx. Rewrite A's `to` to point directly at the final destination, unless B exists because A's destination moved in newer versions only. Then the chain is correct and expected. See [Avoid chained redirects](#avoid-chained-redirects). Not auto-fixed (requires choosing the right destination).
 
 Validation is rules-based and decidable in closed form because RtD's pattern surface is intentionally narrow (suffix `*` only, four redirect types, no embedded wildcards). URL-style types (`clean_url_to_html` / `html_to_clean_url`) are excluded since they have no `from` URL to compare.
 
@@ -207,7 +207,7 @@ repos:
       - id: rtd-redirects-validate
         files: ^doc/redirects/.*\.ya?ml$
       - id: rtd-redirects-validate-composed
-        args: [doc/redirects/master.yaml, doc/redirects/current.yaml]
+        args: [doc/redirects/first.yaml, doc/redirects/second.yaml]
 ```
 
 Keep both: the per-file hook catches within-file mistakes on any changed file; the composed hook catches the cross-file interaction. Without `--composed`, the same cross-file check still runs in CI via `validate --composed` or `diff-file`.
@@ -231,10 +231,10 @@ rtd-redirects apply --project anyscale-ray --file doc/redirects/current.yaml --s
 By default `validate` checks each file independently — the pre-commit contract, since a pre-commit hook passes every matching file at once. Pass `--composed` to instead validate the *ordered composition* of all files as one redirect set:
 
 ```bash
-rtd-redirects validate doc/redirects/master.yaml doc/redirects/current.yaml --composed
+rtd-redirects validate doc/redirects/first.yaml doc/redirects/second.yaml --composed
 ```
 
-This catches ordering errors that exist only after composition — a specific rule in `master.yaml` shadowed by a broad catch-all in `current.yaml`, or the reverse. It needs no RtD credentials, so PR-time CI can run it without API access. `--composed` is incompatible with `--fix`: a composed set can't be unambiguously written back into separate files. Run `--fix` per file first, then `--composed` to check cross-file ordering.
+This catches ordering errors that exist only after composition — a specific rule in `first.yaml` shadowed by a broad catch-all in `second.yaml`, or the reverse. It needs no RtD credentials, so PR-time CI can run it without API access. `--composed` is incompatible with `--fix`: a composed set can't be unambiguously written back into separate files. Run `--fix` per file first, then `--composed` to check cross-file ordering.
 
 #### Auto-fix caveats
 
@@ -245,9 +245,9 @@ This catches ordering errors that exist only after composition — a specific ru
 `plan`, `apply`, `audit`, and `diff-file` accept an ordered list of `--file` paths and compose them into one source of truth. `validate --composed` runs the same composition through the credential-free validator.
 
 ```bash
-rtd-redirects plan --file doc/redirects/master.yaml doc/redirects/current.yaml
-rtd-redirects apply --file doc/redirects/master.yaml doc/redirects/current.yaml --yes
-rtd-redirects diff-file --file doc/redirects/master.yaml doc/redirects/current.yaml \
+rtd-redirects plan --file doc/redirects/first.yaml doc/redirects/second.yaml
+rtd-redirects apply --file doc/redirects/first.yaml doc/redirects/second.yaml --yes
+rtd-redirects diff-file --file doc/redirects/first.yaml doc/redirects/second.yaml \
     --base origin/master --head HEAD
 ```
 
@@ -259,16 +259,9 @@ The composition contract:
 - **Duplicate identities are rejected across files.** A `(from_url, type)` authored in two files fails just as loudly as one authored twice in a single file, with an error naming both files. (Live RtD duplicates are still tolerated on the read path; this guard is for authored YAML.)
 - **A single `--file` is unchanged.** One file keeps its authored positions untouched — composition and reindexing only apply once there's more than one file.
 
-### Ray use case: `master.yaml` before `current.yaml`
+### You might not need multiple files
 
-Ray stages next-release redirects in a `master`-scoped file that composes *before* the live `current.yaml`:
-
-```text
-doc/redirects/master.yaml    # /en/master/... rules for the staged next release
-doc/redirects/current.yaml   # live /latest and catch-all/wildcard rules
-```
-
-Composing `master.yaml` first gives its specific `/en/master/...` exact rules lower positions than the broad `page` and wildcard rules in `current.yaml`, so they match first. On release, `master.yaml`'s entries fold into `current.yaml` (their `/en/master/...` destinations become `/en/latest/...`) and `master.yaml` resets empty for the next cycle. The Ray file convention and release-day procedure are tracked separately in the Ray repo.
+Composition was built to stage next-release redirects in a separate file that composes ahead of the live one. For a versioned project, a single file of version-less `page` rules usually does that job without composition. With the default `force: false`, a `page` rule fires only where the old path 404s, so it stays inert on versions that still serve the old path and takes effect on each version as the move reaches it. See [Robust fan-out](#robust-fan-out-page--force-false--splat). Ray keeps its redirects in a single `current.yaml` for this reason.
 
 Because positions are first-match, composing a higher-priority rule ahead of an existing one shifts the existing rule's position down by one. That surfaces as a `reorder` in `plan` / `diff-file`, which is RtD's insert-and-shift semantics working as intended.
 
@@ -439,7 +432,9 @@ Renaming a version slug has the same effect — old-slug URLs return 404, and ma
 
 ### Avoid chained redirects
 
-RtD doesn't promise to resolve chains server-side. If `/a → /b` and `/b → /c` are both configured, RtD serves two 3xx responses (the browser follows each hop). Write each `from` pointing **directly at the final destination** rather than relying on the chain to collapse. If you renamed `/old → /intermediate → /current` over time, the final rule should be `/old → /current` (rewrite the existing redirect, don't stack).
+RtD doesn't promise to resolve chains server-side. If `/a → /b` and `/b → /c` are both configured, RtD serves two 3xx responses (the browser follows each hop). When you add a rule, point its `to` **directly at the final destination** rather than at another rule's `from`.
+
+On a versioned project, don't flatten an existing rule when its destination later moves. Say `/old → /intermediate` exists, and a newer version renames `/intermediate` to `/current`. Older versions still serve `/intermediate`, so the existing rule resolves directly there. Add `/intermediate → /current` for the newer versions and leave `/old → /intermediate` alone. Readers of newer versions take two hops, and readers of older versions still land on a page. Rewriting the existing rule to `/old → /current` sends readers of every version without `/current` to a 404. Flatten only when the final destination exists in every version where the rule fires, such as on an unversioned project. The validator reports the kept chain as a `WARNING chain`, which is expected.
 
 If RtD detects an infinite loop, it returns 404 and stops trying — useful failsafe, but not a substitute for clean authoring.
 
