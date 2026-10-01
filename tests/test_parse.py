@@ -337,26 +337,6 @@ class TestExpansionIntegration:
         }
         assert {r.to_url for r in rs} == {"/en/latest/new.html"}
 
-    def test_language_prefix_is_accepted(self, tmp_path: Path):
-        f = _write(tmp_path, "r.yaml", """
-            schema_version: 1
-            language_prefix: /de
-            redirects:
-              - from: /de/latest/a.html
-                to:   /de/latest/b.html
-                type: exact
-        """)
-        assert next(iter(parse_file(f))).from_url == "/de/latest/a.html"
-
-    def test_language_prefix_must_be_string(self, tmp_path: Path):
-        f = _write(tmp_path, "r.yaml", """
-            schema_version: 1
-            language_prefix: 42
-            redirects: []
-        """)
-        with pytest.raises(ParseError, match="'language_prefix' must be a string"):
-            parse_file(f)
-
 
 class TestRemovedMultiVersion:
     """``defaults:`` and ``versions:`` were removed in 0.3.0 and fail loudly."""
@@ -385,6 +365,16 @@ class TestRemovedMultiVersion:
         msg = str(exc.value)
         assert "redirects[0]: 'versions' was removed in rtd-redirects 0.3.0" in msg
         assert "fully-qualified 'from'" in msg
+
+
+    def test_language_prefix_rejected(self, tmp_path: Path):
+        f = _write(tmp_path, "r.yaml", """
+            schema_version: 1
+            language_prefix: /de
+            redirects: []
+        """)
+        with pytest.raises(ParseError, match="'language_prefix' was removed .* delete the key"):
+            parse_file(f)
 
 
 class TestDuplicateIdentity:

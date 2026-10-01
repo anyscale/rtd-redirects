@@ -8,9 +8,9 @@ Entries whose ``from:`` is a list are routed to ``expand.py``, which fans them
 out into one record per source. Canonical 1:1 entries take the short path here.
 
 A redirect set is one file. Ordered multi-file composition and multi-version
-expansion (``versions:`` and ``defaults.versions``) were removed in 0.3.0; a
-file that still uses ``defaults:`` or ``versions:`` fails to parse with a
-message that says how to rewrite it.
+expansion (``versions:``, ``defaults.versions``, and the ``language_prefix:``
+key that fed it) were removed in 0.3.0; a file that still uses them fails to
+parse with a message that says how to rewrite it.
 """
 
 from __future__ import annotations
@@ -128,9 +128,14 @@ def _process_text(text: str, source: Path) -> Iterable[Redirect]:
         )
 
     _validate_schema_version(source, doc)
-    _check_language_prefix(source, doc)
     if "defaults" in doc:
         raise ParseError(f"{source}: 'defaults' {_REMOVED_MULTI_VERSION}")
+    if "language_prefix" in doc:
+        raise ParseError(
+            f"{source}: 'language_prefix' was removed in rtd-redirects 0.3.0. It only "
+            "fed multi-version expansion, so it had no effect; delete the key. "
+            "'simulate' takes the prefix as --language-prefix."
+        )
 
     redirects = doc.get("redirects")
     if redirects is None:
@@ -154,19 +159,6 @@ def _validate_schema_version(path: Path, doc: dict[str, Any]) -> None:
         raise ParseError(
             f"{path}: unsupported schema_version {version!r}; "
             f"this version of rtd-redirects supports {SCHEMA_VERSION}"
-        )
-
-
-def _check_language_prefix(path: Path, doc: dict[str, Any]) -> None:
-    """Reject a non-string top-level ``language_prefix:``.
-
-    The key is still accepted so existing files parse, but nothing reads it
-    since multi-version expansion, its only consumer, was removed.
-    """
-    value = doc.get("language_prefix")
-    if value is not None and not isinstance(value, str):
-        raise ParseError(
-            f"{path}: 'language_prefix' must be a string, got {type(value).__name__}"
         )
 
 

@@ -219,7 +219,7 @@ rtd-redirects apply --project anyscale-ray --file doc/redirects/current.yaml --s
 
 #### Auto-fix caveats
 
-`--fix` rewrites the YAML using the parsed `RedirectSet`, which loses comments and authoring formatting (`schema_version` and `language_prefix` are preserved). Run `--fix`, review the diff, and commit. The reordering is deterministic — sorted by `(specificity, original position, from_url, type)` — so re-running on a clean file is a no-op.
+`--fix` rewrites the YAML using the parsed `RedirectSet`, which loses comments and authoring formatting (`schema_version` is preserved). Run `--fix`, review the diff, and commit. The reordering is deterministic — sorted by `(specificity, original position, from_url, type)` — so re-running on a clean file is a no-op.
 
 ### `simulate`
 
@@ -439,19 +439,18 @@ Use `force: true` only when you specifically want to override an existing page �
 
 ### Removed in 0.3.0
 
-Two features built for designs that didn't ship were removed in 0.3.0. A file that still uses them fails to parse with an error that says how to rewrite it.
+Two features built for designs that didn't ship were removed in 0.3.0, along with a key that only one of them used. A file that still uses them fails to parse with an error that says how to rewrite it.
 
 - **Multi-version expansion.** Top-level `defaults.versions` and per-entry `versions:` fanned a path-only `exact` rule out across versions. Use a version-less `page` rule instead, which RtD applies on every version and which fires only where the page 404s. See [Robust fan-out](#robust-fan-out-page--force-false--splat). When a rule must target specific versions, write one `exact` entry per version with a fully-qualified `from`, such as `/en/latest/old.html`.
 - **Multi-file composition.** `plan`, `apply`, `audit`, `diff-file`, and `simulate` take a single `--file`. `validate --composed` and the `rtd-redirects-validate-composed` pre-commit hook are gone. Merge the files into one, keeping the earlier file's rules first. `validate` still accepts several files and checks each on its own.
 
-The top-level `language_prefix:` key still parses so existing files keep working, but nothing reads it now that expansion is gone.
+- **The `language_prefix:` key.** It only fed multi-version expansion, so it had no effect on anything else. Delete it. `simulate` takes the prefix as `--language-prefix`.
 
 ### Field reference
 
 | YAML field | RtD field | Default | Notes |
 |---|---|---|---|
 | `schema_version` | n/a | required | Top-level. Currently `1`. |
-| `language_prefix` | n/a | `/en` | Top-level. Accepted for compatibility; unused since 0.3.0. |
 | `from` | `from_url` | required for `page` and `exact` | String or list. Must be a project path, not external. Optional for `clean_url_to_html` / `html_to_clean_url`. |
 | `to` | `to_url` | required for `page` and `exact` | String. Path-only, fully-qualified, or external (`https://`, `mailto:`, etc.). Optional for `clean_url_to_html` / `html_to_clean_url`. |
 | `type` | `type` | required | One of `page`, `exact`, `clean_url_to_html`, `html_to_clean_url`. `exact` matches the full `/<lang>/<version>/...` path; the others apply on every version. |

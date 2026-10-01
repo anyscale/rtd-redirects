@@ -624,7 +624,6 @@ class TestValidateSubcommand:
     ):
         f = _write_yaml(tmp_path / "r.yaml", """
             schema_version: 1
-            language_prefix: /en
             redirects:
               - from: /api/*
                 to:   /v2/:splat
@@ -637,8 +636,7 @@ class TestValidateSubcommand:
         assert rc == EXIT_OK
         rewritten = yaml.safe_load(f.read_text())
         assert rewritten["schema_version"] == 1
-        assert rewritten["language_prefix"] == "/en"
-        assert "defaults" not in rewritten
+        assert set(rewritten) == {"schema_version", "redirects"}
 
     def test_no_api_required(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,

@@ -662,15 +662,13 @@ def _version_matrix(args: argparse.Namespace) -> dict[str, VersionPages]:
 def _write_yaml(path: Path, source: RedirectSet) -> None:
     """Rewrite a YAML file from a (possibly fixed) RedirectSet.
 
-    Reads top-level metadata (schema_version, language_prefix) from
+    Reads top-level metadata (schema_version) from
     the existing file so they're preserved. Loses comments and authoring
     formatting; round-trip-safe for canonical content.
     """
     raw = yaml.safe_load(path.read_text()) or {}
     new_doc: dict[str, object] = {}
     new_doc["schema_version"] = raw.get("schema_version", SCHEMA_VERSION)
-    if "language_prefix" in raw:
-        new_doc["language_prefix"] = raw["language_prefix"]
     new_doc["redirects"] = collapse(source)
     path.write_text(yaml.safe_dump(new_doc, sort_keys=False, default_flow_style=False))
 

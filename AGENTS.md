@@ -47,7 +47,7 @@ The MVP was ~1000 LOC across nine modules; `simulate` added three more. Each is 
 - **Identity is `(from_url, type)`**, not the API `pk`. Same data identifies the same record whether it came from YAML or RtD.
 - **`pk` is excluded from `Redirect.__eq__`** (via `field(compare=False)`). YAML-parsed records (no `pk`) compare cleanly against API-fetched records (`pk` set).
 - **External `from` URLs are rejected** at parse time. RtD can only intercept requests for paths it serves. External `to` URLs are fully supported (cross-host redirects to `docs.anyscale.com`, blog posts, `mailto:`, etc.).
-- **`/en` is a default, not an assumption.** `validate`, `resolve`, and `simulate` take a `language_prefix` parameter. The YAML `language_prefix:` key still parses but is unused since 0.3.0; it only fed multi-version expansion.
+- **`/en` is a default, not an assumption.** `validate`, `resolve`, and `simulate` take a `language_prefix` parameter. The YAML `language_prefix:` key was removed in 0.3.0; it only fed multi-version expansion.
 - **`apply` runs in safe order**: deletes free identities; adds create; updates settle data; reorders fix positions last so the position counter doesn't churn during data changes.
 - **Reorders are mutually exclusive with updates** — a position-plus-other-field change is an update (one PUT sets both); a position-only change is a reorder.
 - **Duplicate identities are tolerated on read and healed by `apply`, but rejected in authored YAML.** RtD permits them; the tool doesn't. See [Duplicate identities](#duplicate-identities) below.
@@ -162,10 +162,7 @@ Captured here so it doesn't get lost. Listed in rough priority order.
 
 ### Feature gaps in the tool
 
-1. **Languageless URL prefix (`language_prefix=""`)** — rejected today. Supporting it needs path-only-vs-fully-qualified detection without a language segment. Options:
-   - Require explicit `known_versions:` list at YAML top level.
-   - Use the live version list (`RtdClient.list_versions` already exists).
-   Pre-requisite if `docs.ray.io` ever drops `/en`. Note: the *migration* from `/en/...` to `/...` can be done today with a single suffix-wildcard exact redirect (`/en/*` → `/:splat`); the deferred work is ongoing YAML authoring AFTER the prefix is gone.
+1. **Projects without a language prefix** ([DOC-1731](https://anyscale1.atlassian.net/browse/DOC-1731), blocks [DOC-1156](https://anyscale1.atlassian.net/browse/DOC-1156), the docs.ray.io `/en` removal). `validate`, `resolve`, and `simulate` find the version by reading past the language segment, so with `language_prefix=""` they mistake a path's first segment for a version. The fix is a known list of version slugs: `simulate`'s `--pages` names, or `RtdClient.list_versions` for `validate`. The migration itself is expected to be an `exact` `/en/*` → `/:splat` catch-all, unconfirmed on RtD until DOC-1731 tests it.
 1. **Wildcard `*` placement validation** — RtD only accepts suffix wildcards. We pass URL strings through without checking; an infix or prefix `*` (e.g. `/foo/*/bar`) would be rejected by the API at apply time with a clearer error than we could give. Could add a parse-time check, but the cost/benefit is marginal — agents writing redirects rarely make this mistake, and RtD's error is informative.
 1. **Validator follow-ups**. The first cut of `validate.py` covers ordering (specific-must-come-first) and chain candidates (A.to overlaps B.from). Future work that builds on the same Pattern machinery:
    - **Cycle detection** — A.to matches B.from, B.to matches A.from. Today this surfaces as two separate chain findings; a cycle-aware pass could flag the loop explicitly so the operator sees it as one finding instead of N.
