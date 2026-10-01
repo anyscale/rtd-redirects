@@ -2,8 +2,7 @@
 
 Handles authentication, pagination, token-bucket rate limiting at 60 rpm,
 and 429 retry with ``Retry-After``. Wraps the redirect CRUD endpoints used
-by ``rtd-redirects`` plus the versions endpoint that ``expand.py`` calls
-when resolving multi-version YAML entries.
+by ``rtd-redirects`` plus the versions endpoint (``list_versions``).
 
 The API token is read from ``RTD_API_TOKEN`` and never logged, printed,
 or written to disk. Mutating calls log ``METHOD URL -> status`` to stderr
