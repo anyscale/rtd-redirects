@@ -601,7 +601,7 @@ class TestValidateSubcommand:
         err = capsys.readouterr().err
         assert "ERROR ordering" in err
 
-    def test_benign_chain_is_info_and_hidden_by_default(
+    def test_force_false_chain_is_info_and_hidden_by_default(
         self, tmp_path: Path, factory, capsys: pytest.CaptureFixture,
     ):
         f = _write_yaml(tmp_path / "r.yaml", """
@@ -619,9 +619,9 @@ class TestValidateSubcommand:
         err = capsys.readouterr().err
         assert "0 error, 0 warning, 1 info" in err
         assert "INFO chain" not in err  # per-line detail suppressed
-        assert "benign chain note hidden" in err
+        assert "1 chain note hidden" in err
 
-    def test_show_info_lists_benign_chain_detail(
+    def test_show_info_lists_chain_detail(
         self, tmp_path: Path, factory, capsys: pytest.CaptureFixture,
     ):
         f = _write_yaml(tmp_path / "r.yaml", """

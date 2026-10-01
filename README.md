@@ -174,15 +174,15 @@ rtd-redirects validate doc/redirects/*.yaml
 # Auto-fix ordering errors in place (chains are left for the author)
 rtd-redirects validate doc/redirects/current.yaml --fix
 
-# List the per-rule detail for benign chain notes (info), otherwise summarized
+# List the per-rule detail for chain notes (info), otherwise summarized
 rtd-redirects validate doc/redirects/current.yaml --show-info
 ```
 
 Findings come in three severities:
 
 - **`ERROR ordering`** — rule A's match set is a strict subset of rule B's, but A's position is higher. B fires first; A is unreachable. Lower A's position so it comes before B. `--fix` reorders deterministically. Errors fail `--strict` and the pre-commit hook.
-- **`WARNING chain`** — rule A's `to` could match a *specific* rule B, or a path-preserving wildcard move (B's `to` carries `:splat`). B would send A's target elsewhere, so the request chains: a 3xx to A.to, then another to B. Rewrite A's `to` to point at the final destination. Not auto-fixed.
-- **`INFO chain`** — a benign overlap that can't actually chain: either A's target lands under a broad fixed-page catch-all (`force: false` fires it only on a 404, and a catch-all can't be pointed past), or A is a `:splat` move a lower-position rule preempts from ever reaching B. Summarized as a count so a real `WARNING` isn't buried; `--show-info` lists them. Never fails `--strict`.
+- **`WARNING chain`** — rule A's `to` matches rule B's `from`, and B is `force: true`. B fires even where A's target exists, so the request chains on every version: a 3xx to A.to, then another to B. Point A's `to` at B's destination. Not auto-fixed.
+- **`INFO chain`** — rule A's `to` could match rule B's `from`, but B is `force: false`, so it fires only where A's target 404s. The request chains only on versions without that page. After a move in newer versions only, that's the expected shape: the existing rule keeps older versions resolving. See [Avoid chained redirects](#avoid-chained-redirects). Rules alone can't show which versions have which pages, so run [`simulate`](#simulate) to check where each URL lands. A `:splat` move that a lower-position rule preempts from ever reaching B is also `info`, since it can't chain at all. Info findings are summarized as a count; `--show-info` lists them. They never fail `--strict`.
 
 Validation is rules-based and decidable in closed form because RtD's pattern surface is intentionally narrow (suffix `*` only, four redirect types, no embedded wildcards). URL-style types (`clean_url_to_html` / `html_to_clean_url`) are excluded since they have no `from` URL to compare.
 
@@ -499,7 +499,7 @@ Renaming a version slug has the same effect — old-slug URLs return 404, and ma
 
 RtD doesn't promise to resolve chains server-side. If `/a → /b` and `/b → /c` are both configured, RtD serves two 3xx responses (the browser follows each hop). When you add a rule, point its `to` **directly at the final destination** rather than at another rule's `from`.
 
-On a versioned project, don't flatten an existing rule when its destination later moves. Say `/old → /intermediate` exists, and a newer version renames `/intermediate` to `/current`. Older versions still serve `/intermediate`, so the existing rule resolves directly there. Add `/intermediate → /current` for the newer versions and leave `/old → /intermediate` alone. Readers of newer versions take two hops, and readers of older versions still land on a page. Rewriting the existing rule to `/old → /current` sends readers of every version without `/current` to a 404. Flatten only when the final destination exists in every version where the rule fires, such as on an unversioned project. The validator reports the kept chain as a `WARNING chain`, which is expected.
+On a versioned project, don't flatten an existing rule when its destination later moves. Say `/old → /intermediate` exists, and a newer version renames `/intermediate` to `/current`. Older versions still serve `/intermediate`, so the existing rule resolves directly there. Add `/intermediate → /current` for the newer versions and leave `/old → /intermediate` alone. Readers of newer versions take two hops, and readers of older versions still land on a page. Rewriting the existing rule to `/old → /current` sends readers of every version without `/current` to a 404. Flatten only when the final destination exists in every version where the rule fires, such as on an unversioned project. The validator reports the kept chain as an `INFO chain`. Run [`simulate`](#simulate) to confirm it lands on a page on every version.
 
 If RtD detects an infinite loop, it returns 404 and stops trying — useful failsafe, but not a substitute for clean authoring.
 

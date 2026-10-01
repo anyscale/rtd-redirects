@@ -217,7 +217,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_validate.add_argument(
         "--show-info", action="store_true",
-        help="List the per-rule detail for benign chain notes (info findings), "
+        help="List the per-rule detail for chain notes (info findings), "
              "which are otherwise summarized as a count so actionable warnings "
              "stand out.",
     )
@@ -772,10 +772,10 @@ def _print_findings(
 ) -> None:
     """Render validation findings one per line. Empty input produces no output.
 
-    ``error`` and ``warning`` findings always print. ``info`` findings (benign
-    chain notes) are counted in the summary but their per-line detail is hidden
+    ``error`` and ``warning`` findings always print. ``info`` findings (chain
+    notes) are counted in the summary but their per-line detail is hidden
     unless ``show_info`` is set, so an actionable ``warning`` isn't buried under
-    a wall of benign notes.
+    a wall of version-dependent chain notes.
     """
     if file is None:
         file = sys.stderr
@@ -795,7 +795,7 @@ def _print_findings(
     if infos and not show_info:
         note = "note" if infos == 1 else "notes"
         print(
-            f"  ({infos} benign chain {note} hidden; "
+            f"  ({infos} chain {note} hidden; "
             f"run 'validate --show-info' to list them)",
             file=file,
         )
