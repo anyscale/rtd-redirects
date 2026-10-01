@@ -1,6 +1,6 @@
 """rtd-redirects CLI entry point.
 
-Wires the six MVP subcommands end-to-end against the underlying modules:
+Wires the subcommands end-to-end against the underlying modules:
 
 - ``list``: ``RtdClient.list_redirects``
 - ``dump``: ``RtdClient.list_redirects`` + ``collapse`` + YAML serialization
@@ -8,6 +8,8 @@ Wires the six MVP subcommands end-to-end against the underlying modules:
 - ``diff-file``: ``diff_file`` (git-only, no API)
 - ``apply``: ``parse_files`` + ``RtdClient.list_redirects`` + ``diff`` + ``apply``
 - ``audit``: same as ``plan`` but exits non-zero when drift is detected
+- ``validate``: ordering and chain checks (no API)
+- ``simulate``: replay URLs through two rule sets across a version matrix (no API)
 
 ``plan``, ``apply``, ``audit``, and ``diff-file`` accept an ordered list of
 ``--file`` paths and compose them as one source of truth (earlier files match
@@ -23,6 +25,7 @@ uses the default, which constructs a real ``RtdClient`` from
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 from collections.abc import Callable
@@ -36,10 +39,26 @@ from rtd_redirects.apply import apply_converging
 from rtd_redirects.client import RtdAuthError, RtdClient, RtdClientError
 from rtd_redirects.collapse import collapse
 from rtd_redirects.diff import Diff, diff
-from rtd_redirects.diff_file import GitError, diff_file
+from rtd_redirects.diff_file import GitError, compose_at_ref, diff_file
 from rtd_redirects.exceptions import ParseError
+from rtd_redirects.expand import DEFAULT_LANGUAGE_PREFIX
 from rtd_redirects.model import DuplicateGroup, RedirectSet
+from rtd_redirects.pages import PageSourceError, load_pages, spec_kind
 from rtd_redirects.parse import SCHEMA_VERSION, parse_file, parse_files
+from rtd_redirects.resolve import DEFAULT_MAX_HOPS
+from rtd_redirects.simulate import (
+    RenameMap,
+    SimulateError,
+    VersionPages,
+    format_report,
+    load_rename_map,
+    parse_test_url,
+    prefix_tests,
+    renames_from_git,
+    rule_source_tests,
+    simulate,
+    summarize,
+)
 from rtd_redirects.validate import Finding, fix_ordering, validate
 
 ClientFactory = Callable[[str], RtdClient]
@@ -69,6 +88,7 @@ def main(
         "apply": _cmd_apply,
         "audit": _cmd_audit,
         "validate": _cmd_validate,
+        "simulate": _cmd_simulate,
     }
 
     try:
@@ -82,6 +102,9 @@ def main(
     except GitError as e:
         print(f"error: git: {e}", file=sys.stderr)
         return EXIT_GIT
+    except (PageSourceError, SimulateError) as e:
+        print(f"error: simulate: {e}", file=sys.stderr)
+        return EXIT_USAGE
     except FileNotFoundError as e:
         print(f"error: file not found: {e.filename}", file=sys.stderr)
         return EXIT_PARSE
@@ -193,7 +216,135 @@ def _build_parser() -> argparse.ArgumentParser:
              "Catches cross-file ordering errors. Incompatible with --fix.",
     )
 
+    _add_simulate_parser(subparsers)
+
     return parser
+
+
+class _PageSpecAction(argparse.Action):
+    """Append ``(side, VERSION=SOURCE)`` to a list shared by the --pages flags."""
+
+    def __init__(self, option_strings, dest, const=None, **kwargs):
+        super().__init__(option_strings, dest, nargs=None, const=const, **kwargs)
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        specs = list(getattr(namespace, self.dest) or [])
+        specs.append((self.const, values))
+        setattr(namespace, self.dest, specs)
+
+
+def _add_simulate_parser(subparsers: argparse._SubParsersAction) -> None:
+    p = subparsers.add_parser(
+        "simulate",
+        help="Replay URLs through the redirect rules before and after a change, "
+             "across a version matrix, and report regressions, wrong landings, "
+             "and loops. Requires no RtD credentials.",
+    )
+    rules = p.add_argument_group("redirect rules")
+    rules.add_argument(
+        "--file", "-f", nargs="+", metavar="FILE",
+        help="Redirect file(s), relative to the repo root, read at --base for the "
+             "before side and --head for the after side. Multiple files compose in "
+             "order.",
+    )
+    rules.add_argument(
+        "--base", default="origin/master",
+        help="Git ref for the before side (default: origin/master).",
+    )
+    rules.add_argument(
+        "--head", default="HEAD",
+        help="Git ref for the after side (default: HEAD). WORKTREE reads the files "
+             "on disk.",
+    )
+    rules.add_argument(
+        "--before-file", nargs="+", metavar="FILE",
+        help="Read the before side from these files on disk instead of --base.",
+    )
+    rules.add_argument(
+        "--after-file", nargs="+", metavar="FILE",
+        help="Read the after side from these files on disk instead of --head.",
+    )
+    rules.add_argument(
+        "--repo", default=None,
+        help="Path to the repository (default: current working directory).",
+    )
+
+    pages = p.add_argument_group(
+        "version matrix",
+        "Each version needs a page set: html:DIR, inv:PATH_OR_URL, "
+        "sitemap:PATH_OR_URL, git:REF:SRCDIR (REF may be WORKTREE), or list:PATH. "
+        "Include master, latest, and at least one older release.",
+    )
+    # All three flags feed one ordered list so the report follows the order
+    # versions appear on the command line.
+    pages.add_argument(
+        "--pages", action=_PageSpecAction, const="both", dest="page_specs", default=[],
+        metavar="VERSION=SOURCE",
+        help="Page set for VERSION on both sides. Repeat per version.",
+    )
+    pages.add_argument(
+        "--pages-before", action=_PageSpecAction, const="before", dest="page_specs",
+        metavar="VERSION=SOURCE",
+        help="Page set for VERSION before the change, overriding --pages.",
+    )
+    pages.add_argument(
+        "--pages-after", action=_PageSpecAction, const="after", dest="page_specs",
+        metavar="VERSION=SOURCE",
+        help="Page set for VERSION after the change, overriding --pages.",
+    )
+
+    tests = p.add_argument_group("test URLs")
+    tests.add_argument(
+        "--url", action="append", default=[], metavar="URL",
+        help="A URL or path to test. A /<lang>/<version>/ path pins the version; "
+             "any other path runs on every version. Repeatable.",
+    )
+    tests.add_argument(
+        "--urls-file", action="append", default=[], metavar="FILE",
+        help="A file of URLs to test, one per line. Repeatable.",
+    )
+    tests.add_argument(
+        "--prefix", action="append", default=[], metavar="PATH",
+        help="Test every page under PATH in any version's before page set. "
+             "Repeatable.",
+    )
+    tests.add_argument(
+        "--no-rule-sources", action="store_true",
+        help="Don't test each rule's from URL. On by default, with wildcards "
+             "instantiated by a sample page name.",
+    )
+
+    judge = p.add_argument_group("judging")
+    judge.add_argument(
+        "--rename-map", action="append", default=[], metavar="FILE",
+        help="YAML map of old page path to new page path, used to decide whether "
+             "a moved page landed on its new home. Keys ending in * map a prefix "
+             "with :splat. Repeatable.",
+    )
+    judge.add_argument(
+        "--git-renames", metavar="SRCDIR",
+        help="Also derive page renames from git renames of Sphinx sources under "
+             "SRCDIR between --base and --head.",
+    )
+    judge.add_argument(
+        "--hop-budget", type=int, default=None, metavar="N",
+        help="Fail any URL whose after resolution needs more than N redirects.",
+    )
+    judge.add_argument(
+        "--max-hops", type=int, default=DEFAULT_MAX_HOPS, metavar="N",
+        help=f"Treat more than N redirects as a loop (default: {DEFAULT_MAX_HOPS}).",
+    )
+    judge.add_argument(
+        "--language-prefix", default=DEFAULT_LANGUAGE_PREFIX,
+        help=f"URL language segment (default: {DEFAULT_LANGUAGE_PREFIX}).",
+    )
+
+    out = p.add_argument_group("output")
+    out.add_argument("--format", choices=["text", "json"], default="text")
+    out.add_argument(
+        "--limit", type=int, default=40, metavar="N",
+        help="Rows to print per text section (default: 40).",
+    )
 
 
 def _resolve_project(args: argparse.Namespace) -> str:
@@ -419,6 +570,139 @@ def _cmd_validate_composed(args: argparse.Namespace) -> int:
     else:
         print(f"composed ({label}): ok", file=sys.stderr)
     return EXIT_OK
+
+
+def _cmd_simulate(args: argparse.Namespace, *, client_factory: ClientFactory) -> int:
+    """Replay URLs through the before and after rule sets. No RtD API access."""
+    if not args.file and not (args.before_file and args.after_file):
+        print(
+            "error: pass --file (read at --base and --head), or both "
+            "--before-file and --after-file",
+            file=sys.stderr,
+        )
+        return EXIT_USAGE
+
+    before = _rules_side(args.before_file, args.file, args.base, args.repo)
+    after = _rules_side(args.after_file, args.file, args.head, args.repo)
+
+    versions = _version_matrix(args)
+    if not versions:
+        print("error: pass at least one --pages VERSION=SOURCE", file=sys.stderr)
+        return EXIT_USAGE
+    if len(versions) < 3:
+        print(
+            f"note: simulating {len(versions)} version(s). Include master, latest, "
+            "and at least one older release: a rule repointed at a moved page "
+            "breaks only on versions that don't have the move.",
+            file=sys.stderr,
+        )
+
+    renames = RenameMap()
+    for path in args.rename_map:
+        renames.update(load_rename_map(Path(path)))
+    if args.git_renames:
+        renames.update(renames_from_git(
+            args.git_renames, base_ref=args.base, head_ref=args.head, repo_path=args.repo,
+        ))
+
+    tests = set()
+    for url in args.url:
+        tests.add(parse_test_url(url, language_prefix=args.language_prefix))
+    for path in args.urls_file:
+        for line in Path(path).read_text().splitlines():
+            if line.strip() and not line.lstrip().startswith("#"):
+                tests.add(parse_test_url(line.strip(), language_prefix=args.language_prefix))
+    if not args.no_rule_sources:
+        tests |= rule_source_tests([before, after], language_prefix=args.language_prefix)
+    tests |= prefix_tests(versions, args.prefix)
+    tests |= {parse_test_url(old) for old in renames.exact}
+    if not tests:
+        print("error: no test URLs; pass --url, --urls-file, or --prefix", file=sys.stderr)
+        return EXIT_USAGE
+
+    report = simulate(
+        before, after, versions, tests,
+        renames=renames,
+        hop_budget=args.hop_budget,
+        language_prefix=args.language_prefix,
+        max_hops=args.max_hops,
+    )
+    if args.format == "json":
+        json.dump(summarize(report), sys.stdout, indent=2)
+        print()
+    else:
+        print(format_report(report, limit=args.limit, language_prefix=args.language_prefix))
+    return EXIT_VALIDATION if report.failures else EXIT_OK
+
+
+def _rules_side(
+    files: list[str] | None,
+    ref_files: list[str] | None,
+    ref: str,
+    repo: str | None,
+) -> RedirectSet:
+    """Load one side's rules: explicit on-disk files, else ``ref_files`` at ``ref``."""
+    if files:
+        return parse_files([Path(f) for f in files])
+    assert ref_files  # checked by the caller
+    if ref == "WORKTREE":
+        root = Path(repo or ".")
+        return parse_files([root / f for f in ref_files])
+    return compose_at_ref([Path(f) for f in ref_files], ref, repo)
+
+
+def _version_matrix(args: argparse.Namespace) -> dict[str, VersionPages]:
+    """Build each version's before and after page sets from the --pages flags."""
+    before: dict[str, str] = {}
+    after: dict[str, str] = {}
+    names: list[str] = []
+    overrides = []
+    for side, value in args.page_specs:
+        version, sep, spec = value.partition("=")
+        if not sep or not version or not spec:
+            flag = "--pages" if side == "both" else f"--pages-{side}"
+            raise SimulateError(f"{flag} expects VERSION=SOURCE, got {value!r}")
+        if version not in names:
+            names.append(version)
+        if side == "both":
+            before.setdefault(version, spec)
+            after.setdefault(version, spec)
+        else:
+            overrides.append((side, version, spec))
+    # Side-specific flags override --pages regardless of argument order.
+    for side, version, spec in overrides:
+        (before if side == "before" else after)[version] = spec
+
+    missing = [v for v in names if v not in before or v not in after]
+    if missing:
+        raise SimulateError(
+            f"version(s) {', '.join(missing)} need a page set on both sides; "
+            "pass --pages, or both --pages-before and --pages-after"
+        )
+
+    # A git tree has no build-generated pages; built sources do. Comparing the
+    # two makes every generated page look added or removed by the change.
+    mixed = [
+        v for v in names if (spec_kind(before[v]) == "git") != (spec_kind(after[v]) == "git")
+    ]
+    if mixed:
+        print(
+            f"note: {', '.join(mixed)}: one side reads a git tree and the other a "
+            "build. Generated pages, such as API stubs, are missing from the git "
+            "tree, so they read as added or removed by the change.",
+            file=sys.stderr,
+        )
+
+    cache: dict[str, frozenset[str]] = {}
+
+    def load(spec: str) -> frozenset[str]:
+        if spec not in cache:
+            cache[spec] = load_pages(
+                spec, repo_path=args.repo, language_prefix=args.language_prefix,
+            )
+        return cache[spec]
+
+    return {v: VersionPages(before=load(before[v]), after=load(after[v])) for v in names}
 
 
 def _write_yaml(path: Path, source: RedirectSet) -> None:

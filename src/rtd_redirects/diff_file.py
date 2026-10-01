@@ -60,13 +60,13 @@ def diff_file(
     else:
         paths = [Path(p) for p in file_paths]
 
-    base_set = _compose_at_ref(paths, base_ref, repo_path)
-    head_set = _compose_at_ref(paths, head_ref, repo_path)
+    base_set = compose_at_ref(paths, base_ref, repo_path)
+    head_set = compose_at_ref(paths, head_ref, repo_path)
 
     return diff(head_set, base_set)
 
 
-def _compose_at_ref(
+def compose_at_ref(
     paths: Sequence[Path],
     ref: str,
     repo_path: str | Path | None,

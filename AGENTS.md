@@ -23,7 +23,7 @@ Revisit to "Option A" (full OSS, actively generalized) only if outside adoption 
 
 ## Architecture
 
-The MVP is ~1000 LOC across nine modules. Each is documented at the top of the file.
+The MVP was ~1000 LOC across nine modules; `simulate` added three more. Each is documented at the top of the file.
 
 | Module | Responsibility |
 |---|---|
@@ -37,7 +37,10 @@ The MVP is ~1000 LOC across nine modules. Each is documented at the top of the f
 | `diff_file.py` | Git-only PR-time diff. Reads YAML at two refs via `git show`, runs each through `parse_text`, returns a `Diff`. No API. |
 | `apply.py` | Drives a `Diff` against `RtdClient` in safe order: deletes → adds → updates → reorders. Per-entry stderr audit log. |
 | `validate.py` | Rules-based ordering and chain detection over a `RedirectSet`. Flags unreachable rules (specific-with-higher-position-than-general) and chain candidates (A.to matches B.from). |
-| `cli.py` | `argparse` entry point. Wires seven subcommands: `list`, `dump`, `plan`, `diff-file`, `apply`, `audit`, `validate`. Validation runs always on `audit` and `validate`, and on `plan` / `apply` with `--strict`. |
+| `resolve.py` | Request-time model of RtD redirect resolution. `Resolver` follows one URL on one version through a `RedirectSet` against per-version page sets: first match by position, `force: false` only on 404, `page` vs `exact` matching, `:splat`, version-switching targets, loop detection. Shared engine for any check that asks where a URL lands. |
+| `pages.py` | Page-set loaders for simulation: built HTML dir, `objects.inv`, `sitemap.xml`, git tree of Sphinx sources, or a path list. Local path or URL. |
+| `simulate.py` | Before/after comparison over a version matrix. Builds test URLs (rule sources, prefixes, explicit), resolves both sides, judges each against the expected page via a `RenameMap` (from YAML or git renames), and reports regressions, wrong landings, new loops, and hop-budget overruns. |
+| `cli.py` | `argparse` entry point. Wires eight subcommands: `list`, `dump`, `plan`, `diff-file`, `apply`, `audit`, `validate`, `simulate`. Validation runs always on `audit` and `validate`, and on `plan` / `apply` with `--strict`. |
 
 ## Key design choices
 
@@ -175,6 +178,10 @@ Captured here so it doesn't get lost. Listed in rough priority order.
    - **Wildcard `*` placement** — RtD rejects prefix and infix wildcards. Today the API returns the error at apply time; the validator could catch it at parse time with a clearer message.
    - **Splat-substitution precision** — chain detection treats `:splat` conservatively (literal-prefix match). A more precise model would resolve the actual substituted URL against B's pattern; trade-off is more code for fewer false positives.
    - **Multiple language prefixes** — when a project hosts multiple language variants, the validator should accept a list of language prefixes or resolve them from the YAML's per-file `language_prefix:`. Today it takes a single prefix.
+1. **`simulate` follow-ups** ([DOC-1712](https://anyscale1.atlassian.net/browse/DOC-1712)):
+   - **`--live` spot check** — request a sample of the predicted URLs against the real site and compare final URL and hop count, as the prototype's validation did. Only meaningful after `apply`, so it fits a post-apply audit better than the pre-push gate.
+   - **Coverage guard on the same engine** — [DOC-1697](https://anyscale1.atlassian.net/browse/DOC-1697)'s removed-URL guard asks "is this removed URL covered?"; `resolve.Resolver` already answers it. Build the guard on the resolver rather than a second matcher.
+   - **Union page sources** — a `git:` after set misses generated pages that an `inv:` before set has. Composing sources per side, such as the git tree plus generated pages outside the renamed prefixes, would let a pre-push gate compare like with like without a full build.
 1. **Source-file + line tracking on `Redirect`** — design.md asks `apply` to log per-entry with "source YAML file and line number". Currently `apply` only logs the URL. Adding requires `source_file: Path | None` and `source_line: int | None` fields on `Redirect` (with `compare=False`), populated by `parse` and `expand`, surfaced by `apply` log lines.
 1. **Flask integration test fixture** — design.md mentions a `pytest` fixture with a Flask server that models the v3 API. Currently we only have unit tests with mocks. Worth adding once a real apply hits an edge the mocks didn't cover.
 1. **`apply --no-delete`** — design.md mentions a flag that skips destructive operations and applies only adds/updates. Useful for cautious first runs.

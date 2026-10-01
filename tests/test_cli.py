@@ -15,6 +15,7 @@ from rtd_redirects.cli import (
     EXIT_OK,
     EXIT_PARSE,
     EXIT_RTD,
+    EXIT_USAGE,
     EXIT_VALIDATION,
     main,
 )
@@ -915,3 +916,188 @@ class TestDuplicateHandling:
         err = capsys.readouterr().err
         assert "duplicate live" in err
         assert "DIFFERENT TARGET" not in err
+
+
+class TestSimulate:
+    BEFORE = """
+        schema_version: 1
+        redirects:
+          - from: /legacy.html
+            to: /old/a.html
+            type: page
+    """
+    # Repoints /legacy.html at the new path: right on master, a 404 elsewhere.
+    AFTER_BAD = """
+        schema_version: 1
+        redirects:
+          - from: /legacy.html
+            to: /new/a.html
+            type: page
+          - from: /old/*
+            to: /new/:splat
+            type: page
+    """
+    AFTER_GOOD = """
+        schema_version: 1
+        redirects:
+          - from: /legacy.html
+            to: /old/a.html
+            type: page
+          - from: /old/*
+            to: /new/:splat
+            type: page
+    """
+
+    @pytest.fixture
+    def pages(self, tmp_path: Path) -> dict[str, Path]:
+        old = tmp_path / "old.txt"
+        old.write_text("/index.html\n/old/a.html\n")
+        new = tmp_path / "new.txt"
+        new.write_text("/index.html\n/new/a.html\n")
+        return {"old": old, "new": new}
+
+    def _matrix(self, pages: dict[str, Path]) -> list[str]:
+        return [
+            "--pages-before", f"master=list:{pages['old']}",
+            "--pages-after", f"master=list:{pages['new']}",
+            "--pages", f"latest=list:{pages['old']}",
+            "--pages", f"v1=list:{pages['old']}",
+        ]
+
+    def _files(self, tmp_path: Path, before: str, after: str) -> list[str]:
+        b = _write_yaml(tmp_path / "before.yaml", before)
+        a = _write_yaml(tmp_path / "after.yaml", after)
+        return ["--before-file", str(b), "--after-file", str(a)]
+
+    def test_clean_change_exits_ok(self, tmp_path, pages, capsys):
+        rc = main([
+            "simulate", *self._files(tmp_path, self.BEFORE, self.AFTER_GOOD),
+            *self._matrix(pages), "--rename-map", str(_write_yaml(
+                tmp_path / "renames.yaml", "/old/*: /new/:splat\n",
+            )),
+        ])
+        out = capsys.readouterr()
+        assert rc == EXIT_OK
+        assert "simulate: ok" in out.out
+        assert "note:" not in out.err
+
+    def test_repointed_target_fails_on_older_versions(self, tmp_path, pages, capsys):
+        rc = main([
+            "simulate", *self._files(tmp_path, self.BEFORE, self.AFTER_BAD),
+            *self._matrix(pages),
+        ])
+        out = capsys.readouterr().out
+        assert rc == EXIT_VALIDATION
+        assert out.count("regressions: 1") == 2
+        assert "simulate: FAIL, 2 failing URL check(s)" in out
+
+    def test_json_and_hop_budget(self, tmp_path, pages, capsys):
+        rc = main([
+            "simulate", *self._files(tmp_path, self.BEFORE, self.AFTER_GOOD),
+            *self._matrix(pages), "--hop-budget", "1", "--format", "json",
+            "--no-rule-sources", "--url", "/legacy.html",
+        ])
+        summary = yaml.safe_load(capsys.readouterr().out)
+        assert rc == EXIT_VALIDATION
+        assert summary["versions"]["master"]["over_budget"] == 1
+        assert summary["failures"] == 1
+
+    def test_urls_file_and_prefix(self, tmp_path, pages, capsys):
+        urls = tmp_path / "urls.txt"
+        urls.write_text("# comment\nhttps://docs.example.com/en/v1/legacy.html\n\n")
+        rc = main([
+            "simulate", *self._files(tmp_path, self.BEFORE, self.AFTER_BAD),
+            *self._matrix(pages), "--no-rule-sources", "--urls-file", str(urls),
+            "--prefix", "/old/", "--format", "json",
+        ])
+        outcomes = yaml.safe_load(capsys.readouterr().out)["outcomes"]
+        assert rc == EXIT_VALIDATION
+        assert [(o["version"], o["url"], o["verdict"]) for o in outcomes] == [
+            ("master", "/old/a.html", "unmapped"),
+            ("v1", "/legacy.html", "regression"),
+        ]
+
+    def test_small_matrix_notes_older_release(self, tmp_path, pages, capsys):
+        main([
+            "simulate", *self._files(tmp_path, self.BEFORE, self.BEFORE),
+            "--pages", f"latest=list:{pages['old']}",
+        ])
+        assert "at least one older release" in capsys.readouterr().err
+
+    def test_mixed_source_kinds_note(self, tmp_path, pages, capsys):
+        main([
+            "simulate", *self._files(tmp_path, self.BEFORE, self.BEFORE),
+            "--pages-before", f"master=list:{pages['old']}",
+            "--pages-after", f"master=git:WORKTREE:{tmp_path}",
+            "--pages", f"latest=list:{pages['old']}",
+            "--pages-before", f"v1=list:{pages['old']}",
+            "--pages-after", f"v1=html:{tmp_path}",
+        ])
+        err = capsys.readouterr().err
+        assert "note: master: one side reads a git tree" in err
+        assert "v1" not in err
+
+    def test_reads_rules_and_renames_from_git(self, tmp_path, capsys):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        git = ["git", "-C", str(repo)]
+        subprocess.run([*git, "init", "-q"], check=True)
+        subprocess.run([*git, "config", "user.email", "t@t.com"], check=True)
+        subprocess.run([*git, "config", "user.name", "t"], check=True)
+        subprocess.run([*git, "config", "commit.gpgsign", "false"], check=True)
+        (repo / "src" / "old").mkdir(parents=True)
+        (repo / "src" / "old" / "a.md").write_text("page\n" * 20)
+        (repo / "src" / "index.md").write_text("")
+        _write_yaml(repo / "r.yaml", "schema_version: 1\nredirects: []\n")
+        subprocess.run([*git, "add", "."], check=True)
+        subprocess.run([*git, "commit", "-qm", "base"], check=True)
+        subprocess.run([*git, "tag", "base"], check=True)
+        (repo / "src" / "new").mkdir()
+        subprocess.run([*git, "mv", "src/old/a.md", "src/new/a.md"], check=True)
+        _write_yaml(repo / "r.yaml", """
+            schema_version: 1
+            redirects:
+              - from: /old/*
+                to: /index.html
+                type: page
+        """)
+        args = [
+            "simulate", "--repo", str(repo), "--file", "r.yaml", "--base", "base",
+            "--pages-before", "master=git:base:src", "--git-renames", "src",
+        ]
+        # Uncommitted: read the working tree.
+        rc = main([*args, "--head", "WORKTREE", "--pages-after", "master=git:WORKTREE:src"])
+        out = capsys.readouterr().out
+        assert rc == EXIT_VALIDATION
+        assert "wrong landings: 1" in out
+        assert "expected [master] /new/a.html" in out
+        # Committed: read HEAD.
+        subprocess.run([*git, "commit", "-qam", "move"], check=True)
+        rc = main([*args, "--head", "HEAD", "--pages-after", "master=git:HEAD:src"])
+        assert rc == EXIT_VALIDATION
+        assert "wrong landings: 1" in capsys.readouterr().out
+
+    @pytest.mark.parametrize(
+        ("argv", "message"),
+        [
+            (["--pages", "latest=list:x"], "pass --file"),
+            (["--before-file", "B", "--after-file", "B"], "at least one --pages"),
+            (["--before-file", "B", "--after-file", "B", "--pages", "latest"],
+             "VERSION=SOURCE"),
+            (["--before-file", "B", "--after-file", "B", "--pages-before", "m=list:P"],
+             "both sides"),
+            (["--before-file", "B", "--after-file", "B", "--pages", "m=nope.txt"],
+             "can't tell"),
+            (["--before-file", "B", "--after-file", "B", "--pages", "m=list:P",
+              "--no-rule-sources"], "no test URLs"),
+        ],
+    )
+    def test_usage_errors(self, tmp_path, pages, capsys, argv, message):
+        empty = _write_yaml(tmp_path / "empty.yaml", "schema_version: 1\nredirects: []\n")
+        argv = [
+            a.replace("B", str(empty)) if a == "B" else a.replace("P", str(pages["old"]))
+            for a in argv
+        ]
+        rc = main(["simulate", *argv])
+        assert rc == EXIT_USAGE
+        assert message in capsys.readouterr().err
