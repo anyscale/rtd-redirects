@@ -204,6 +204,104 @@ class TestChainFindings:
         findings = [f for f in validate(rs) if f.kind == "chain"]
         assert findings == []
 
+    def test_force_false_chain_is_info(self):
+        # B fires only where A's target 404s. After a move that keeps the old
+        # rule for older versions, that's the deliberate two-hop shape, so it's
+        # a note pointing at simulate rather than a warning.
+        rs = RedirectSet([
+            _r("/old.html", "/intermediate.html", type="page", position=0),
+            _r("/intermediate.html", "/current.html", type="page", position=1),
+        ])
+        findings = [f for f in validate(rs) if f.kind == "chain"]
+        assert [f.severity for f in findings] == ["info"]
+        assert "rtd-redirects simulate" in findings[0].message
+
+    def test_force_true_chain_is_warning(self):
+        # B fires even where A's target exists, so the chain happens on every
+        # version and A should point at B's destination.
+        rs = RedirectSet([
+            _r("/old.html", "/intermediate.html", type="page", position=0),
+            _r("/intermediate.html", "/current.html", type="page", position=1, force=True),
+        ])
+        findings = [f for f in validate(rs) if f.kind == "chain"]
+        assert [f.severity for f in findings] == ["warning"]
+        assert "force: true" in findings[0].message
+
+    def test_specific_target_under_fixed_catchall_is_info(self):
+        # A.to lands under a broad catch-all with a fixed target. force=false
+        # means the catch-all fires only where A.to 404s, so it's info.
+        rs = RedirectSet([
+            _r("/ray-logging.html", "/observability/configure.html",
+               type="page", position=0),
+            _r("/observability/*", "/observability/index.html",
+               type="page", position=1),
+        ])
+        findings = [f for f in validate(rs) if f.kind == "chain"]
+        assert len(findings) == 1
+        assert findings[0].severity == "info"
+
+    def test_splat_move_into_fixed_catchall_is_info(self):
+        # A path-preserving move (/api_docs/* -> /api/:splat) whose splatted
+        # result lands under a fixed-page catch-all (/api/* -> /api/index.html)
+        # is the same shape: it fires only where the moved path 404s.
+        rs = RedirectSet([
+            _r("/api_docs/*", "/api/:splat", type="page", position=0),
+            _r("/api/*", "/api/index.html", type="page", position=1),
+        ])
+        findings = [f for f in validate(rs) if f.kind == "chain"]
+        assert len(findings) == 1
+        assert findings[0].severity == "info"
+
+    def test_preempted_splat_overlap_is_info(self):
+        # A's splat could reach specific B (/mid/foo.html), but the only source
+        # that drives it there (/old/foo.html) has its own lower-position rule,
+        # so A never fires for it. The overlap can't chain -> info.
+        rs = RedirectSet([
+            _r("/old/foo.html", "/final.html", type="page", position=0),
+            _r("/old/*", "/mid/:splat", type="page", position=1),
+            _r("/mid/foo.html", "/somewhere.html", type="page", position=2),
+        ])
+        findings = [f for f in validate(rs) if f.kind == "chain"]
+        assert len(findings) == 1
+        assert findings[0].severity == "info"
+        assert "preempts" in findings[0].message
+
+    def test_preempted_splat_into_force_true_rule_is_info(self):
+        # Preemption means A never produces B's from, so even a forced B can't
+        # chain.
+        rs = RedirectSet([
+            _r("/old/foo.html", "/final.html", type="page", position=0),
+            _r("/old/*", "/mid/:splat", type="page", position=1),
+            _r("/mid/foo.html", "/somewhere.html", type="page", position=2, force=True),
+        ])
+        findings = [f for f in validate(rs) if f.kind == "chain"]
+        assert [f.severity for f in findings] == ["info"]
+        assert "preempts" in findings[0].message
+
+    def test_unpreempted_splat_overlap_follows_force(self):
+        # No source rule for /old/foo.html, so A does fire there and chains
+        # through B. The tier then depends on whether B is forced.
+        def tiers(force: bool) -> list[str]:
+            rs = RedirectSet([
+                _r("/old/*", "/mid/:splat", type="page", position=0),
+                _r("/mid/foo.html", "/somewhere.html", type="page", position=1, force=force),
+            ])
+            return [f.severity for f in validate(rs) if f.kind == "chain"]
+
+        assert tiers(False) == ["info"]
+        assert tiers(True) == ["warning"]
+
+    def test_move_of_a_move_is_info(self):
+        # /old/* -> /mid/:splat, then /mid/* -> /new/:splat in newer versions.
+        # Older versions still serve /mid/, so the kept chain is correct there.
+        rs = RedirectSet([
+            _r("/old/*", "/mid/:splat", type="page", position=0),
+            _r("/mid/*", "/new/:splat", type="page", position=1),
+        ])
+        findings = [f for f in validate(rs) if f.kind == "chain"]
+        assert findings
+        assert all(f.severity == "info" for f in findings)
+
 
 class TestDeterminism:
     def test_findings_are_byte_stable_across_runs(self):

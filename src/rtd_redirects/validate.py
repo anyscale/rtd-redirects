@@ -25,6 +25,21 @@ The chain detector uses literal-prefix matching on ``to_url`` (stripping
 substitution would actually produce a URL outside the target rule's match
 set. False positives are easy to dismiss; false negatives would silently
 let chains slip through, which is the worse failure mode.
+
+Chain candidates are tiered by whether they chain on every version. With
+``force: false``, the RtD default, B fires only where A's target 404s. On a
+versioned project that's usually deliberate: when a page moves in newer
+versions only, the existing rule keeps pointing at the old path so older
+versions still resolve, and newer versions take a second hop through the
+move's rule. Flattening A would send older versions to a page they don't
+have. Whether that chain is correct depends on which pages exist where, which
+rules alone can't show, so these emit at ``info`` and point at ``simulate``.
+When B is ``force: true`` it fires even where A's target exists, so the chain
+happens on every version and A can point straight at B's target; those stay
+``warning``. A *preempted splat* is ``info`` regardless: when A is a ``/P/* ->
+/Q/:splat`` move and B is a specific ``/Q/<tail>``, the only source that drives
+A into B is ``/P/<tail>``, and if a lower-position rule already matches that
+source, A never fires there, so the overlap can't chain at all.
 """
 
 from __future__ import annotations
@@ -37,7 +52,7 @@ from typing import Literal
 from rtd_redirects.expand import DEFAULT_LANGUAGE_PREFIX, is_external
 from rtd_redirects.model import URL_STYLE_TYPES, Redirect, RedirectSet
 
-Severity = Literal["error", "warning"]
+Severity = Literal["error", "warning", "info"]
 Kind = Literal["ordering", "chain"]
 
 
@@ -258,19 +273,84 @@ def _check_chains(
         for b, pb in zip(rules, patterns, strict=True):
             if pb is None or b.identity == a.identity:
                 continue
-            if _patterns_overlap(target, pb):
+            if not _patterns_overlap(target, pb):
+                continue
+            source = _preempted_splat_source(a, pa, target, pb, rules, patterns)
+            if source is not None:
+                findings.append(Finding(
+                    severity="info",
+                    kind="chain",
+                    message=(
+                        f"'{a.from_url}' redirects to '{a.to_url}', whose splat "
+                        f"could reach '{b.from_url}' ({b.type}) for source "
+                        f"'{source}'. A lower-position rule preempts "
+                        f"'{a.from_url}' for '{source}', so the chain can't fire."
+                    ),
+                    rules=(a, b),
+                ))
+            elif b.force:
                 findings.append(Finding(
                     severity="warning",
                     kind="chain",
                     message=(
-                        f"'{a.from_url}' redirects to '{a.to_url}' which may "
-                        f"match '{b.from_url}' ({b.type}) — request would "
-                        f"chain client-side. Rewrite '{a.from_url}' to point "
-                        f"directly at the final destination."
+                        f"'{a.from_url}' redirects to '{a.to_url}', which matches "
+                        f"'{b.from_url}' ({b.type}, force: true). B fires even "
+                        f"where '{a.to_url}' exists, so the request chains on "
+                        f"every version. Point '{a.from_url}' at B's destination."
+                    ),
+                    rules=(a, b),
+                ))
+            else:
+                findings.append(Finding(
+                    severity="info",
+                    kind="chain",
+                    message=(
+                        f"'{a.from_url}' redirects to '{a.to_url}', which may match "
+                        f"'{b.from_url}' ({b.type}). B fires only where "
+                        f"'{a.to_url}' 404s, so this chains only on versions "
+                        f"without that page. Keep it if '{a.to_url}' moved in "
+                        f"newer versions only; run 'rtd-redirects simulate' to "
+                        f"check each version."
                     ),
                     rules=(a, b),
                 ))
     return findings
+
+
+def _preempted_splat_source(
+    a: Redirect,
+    pa: _Pattern,
+    target: _Pattern,
+    pb: _Pattern,
+    rules: list[Redirect],
+    patterns: list[_Pattern | None],
+) -> str | None:
+    """Source path for an A→B splat overlap that a lower-position rule preempts.
+
+    When A is a splat move (``/P/* -> /Q/:splat``) and B is a *specific* rule
+    ``/Q/<tail>``, the only request that would drive A into B is ``/P/<tail>``.
+    A fires there only if no earlier rule matches it. If a rule at a lower
+    ``position`` than A already matches ``/P/<tail>`` across all versions A
+    covers, A never produces B's ``from`` and the chain can't fire.
+
+    Returns the reconstructed source path when preempted, else ``None``. Only
+    handles the page-wildcard case; ``exact`` (single-version) preemptors are
+    ignored so a per-version gap isn't hidden.
+    """
+    if not pa.has_wildcard or ":splat" not in a.to_url:
+        return None
+    if pb.has_wildcard:
+        return None  # B is itself broad; not a specific-target overlap
+    if not pb.prefix.startswith(target.prefix):
+        return None
+    splat_value = pb.prefix[len(target.prefix):]
+    source = _Pattern(version="*", prefix=pa.prefix + splat_value, has_wildcard=False)
+    for c, pc in zip(rules, patterns, strict=True):
+        if pc is None or c.identity == a.identity or c.position >= a.position:
+            continue
+        if source == pc or _is_strict_subset(source, pc):
+            return source.prefix
+    return None
 
 
 def _target_pattern(to_url: str, language_prefix: str) -> _Pattern | None:
