@@ -168,7 +168,7 @@ Validate ordering and chain risks in one or more YAML files. **No RtD credential
 # Single file
 rtd-redirects validate doc/redirects/current.yaml
 
-# Multiple files (pre-commit passes them this way)
+# Several files, each validated on its own (pre-commit passes them this way)
 rtd-redirects validate doc/redirects/*.yaml
 
 # Auto-fix ordering errors in place (chains are left for the author)
@@ -201,20 +201,7 @@ repos:
 
 The hook fails the commit on any `ERROR` finding. Run `pre-commit run rtd-redirects-validate --all-files` locally to surface issues before pushing.
 
-`rtd-redirects-validate` validates each file independently, because pre-commit passes only the files a commit changed. To catch cross-file ordering errors at commit time, add the composed hook. It needs the complete ordered file list every time, so it pins the list via `args` and runs with `pass_filenames: false` rather than relying on the changed-file set:
-
-```yaml
-repos:
-  - repo: https://github.com/anyscale/rtd-redirects
-    rev: v0.1.0
-    hooks:
-      - id: rtd-redirects-validate
-        files: ^doc/redirects/.*\.ya?ml$
-      - id: rtd-redirects-validate-composed
-        args: [doc/redirects/first.yaml, doc/redirects/second.yaml]
-```
-
-Keep both: the per-file hook catches within-file mistakes on any changed file; the composed hook catches the cross-file interaction. Without `--composed`, the same cross-file check still runs in CI via `validate --composed` or `diff-file`.
+`rtd-redirects-validate` validates each file independently.
 
 #### `--strict` on `plan` / `apply`
 
@@ -230,19 +217,9 @@ rtd-redirects apply --project anyscale-ray --file doc/redirects/current.yaml --s
 
 `audit` runs the validator unconditionally and exits non-zero if either drift or validation errors exist (drift is exit 1, validation error is exit 6; validation takes precedence).
 
-#### `--composed` validation across files
-
-By default `validate` checks each file independently — the pre-commit contract, since a pre-commit hook passes every matching file at once. Pass `--composed` to instead validate the *ordered composition* of all files as one redirect set:
-
-```bash
-rtd-redirects validate doc/redirects/first.yaml doc/redirects/second.yaml --composed
-```
-
-This catches ordering errors that exist only after composition — a specific rule in `first.yaml` shadowed by a broad catch-all in `second.yaml`, or the reverse. It needs no RtD credentials, so PR-time CI can run it without API access. `--composed` is incompatible with `--fix`: a composed set can't be unambiguously written back into separate files. Run `--fix` per file first, then `--composed` to check cross-file ordering.
-
 #### Auto-fix caveats
 
-`--fix` rewrites the YAML using the parsed `RedirectSet`, which loses comments and authoring formatting (`schema_version`, `language_prefix`, and `defaults` are preserved). Run `--fix`, review the diff, and commit. The reordering is deterministic — sorted by `(specificity, original position, from_url, type)` — so re-running on a clean file is a no-op.
+`--fix` rewrites the YAML using the parsed `RedirectSet`, which loses comments and authoring formatting (`schema_version` and `language_prefix` are preserved). Run `--fix`, review the diff, and commit. The reordering is deterministic — sorted by `(specificity, original position, from_url, type)` — so re-running on a clean file is a no-op.
 
 ### `simulate`
 
@@ -259,7 +236,7 @@ rtd-redirects simulate --file doc/redirects/current.yaml --base origin/master --
     --prefix /ray-core/ --git-renames doc/source
 ```
 
-**Rules.** `--file` reads the redirect file(s) at `--base` for the before side and `--head` for the after side, composing multiple files in order. `--head WORKTREE` reads the files on disk. `--before-file` and `--after-file` take on-disk files directly instead.
+**Rules.** `--file` reads the redirect file at `--base` for the before side and `--head` for the after side. `--head WORKTREE` reads the file on disk. `--before-file` and `--after-file` take on-disk files directly instead.
 
 **Version matrix.** Each version needs a page set before and after the change. `--pages VERSION=SOURCE` sets both sides; `--pages-before` and `--pages-after` override one side. A version the change doesn't touch, such as an older release, uses `--pages` alone. Include `master`, `latest`, and at least one older release: a rule repointed at a moved page's new path is right on `master` and breaks on every version that doesn't have the move, so a matrix without older releases can't see it. `simulate` prints a note when the matrix has fewer than three versions.
 
@@ -305,32 +282,9 @@ Output is a text report per version, or `--format json` for the per-version coun
 
 The resolver models the semantics in [Wildcards](#wildcards--and-splat), [Rule ordering](#rule-ordering-specific-before-general), and [Robust fan-out](#robust-fan-out-page--force-false--splat): position-based first match, `force: false` firing only on a 404, `page` rules matching the path after `/<lang>/<version>`, `exact` rules matching the full path, a suffix `*` with `:splat`, fragments never matching server-side, and `/<lang>/<version>/` targets switching to that version's pages. Disabled rules and the URL-style types are ignored.
 
-## Multiple files: ordered composition
-
-`plan`, `apply`, `audit`, and `diff-file` accept an ordered list of `--file` paths and compose them into one source of truth. `validate --composed` runs the same composition through the credential-free validator.
-
-```bash
-rtd-redirects plan --file doc/redirects/first.yaml doc/redirects/second.yaml
-rtd-redirects apply --file doc/redirects/first.yaml doc/redirects/second.yaml --yes
-rtd-redirects diff-file --file doc/redirects/first.yaml doc/redirects/second.yaml \
-    --base origin/master --head HEAD
-```
-
-The composition contract:
-
-- **File order is meaningful.** Every record from an earlier file is positioned before every record from a later file, so an earlier file's rules match first under RtD's strict first-match. Argument order decides this, not how the paths happen to sort.
-- **Positions are reindexed globally.** Each file's local positions start at zero; after concatenation the composed set is reindexed to `0..N-1`. The composed order is explicit, not an artifact of how Python sorted overlapping position values.
-- **Within a file, authored order is preserved.** A file's own `position` values decide its internal order before the global reindex flattens them.
-- **Duplicate identities are rejected across files.** A `(from_url, type)` authored in two files fails just as loudly as one authored twice in a single file, with an error naming both files. (Live RtD duplicates are still tolerated on the read path; this guard is for authored YAML.)
-- **A single `--file` is unchanged.** One file keeps its authored positions untouched — composition and reindexing only apply once there's more than one file.
-
-### You might not need multiple files
-
-Composition was built to stage next-release redirects in a separate file that composes ahead of the live one. For a versioned project, a single file of version-less `page` rules usually does that job without composition. With the default `force: false`, a `page` rule fires only where the old path 404s, so it stays inert on versions that still serve the old path and takes effect on each version as the move reaches it. See [Robust fan-out](#robust-fan-out-page--force-false--splat). Ray keeps its redirects in a single `current.yaml` for this reason.
-
-Because positions are first-match, composing a higher-priority rule ahead of an existing one shifts the existing rule's position down by one. That surfaces as a `reorder` in `plan` / `diff-file`, which is RtD's insert-and-shift semantics working as intended.
-
 ## YAML schema
+
+A redirect set is one YAML file.
 
 ### Minimal
 
@@ -355,50 +309,6 @@ redirects:
     to: /en/latest/new.html
     type: exact
 ```
-
-### Multi-version with defaults
-
-Fan a single rename across the active version set. Path-only URLs get qualified with `/<language_prefix>/<version>` per version.
-
-```yaml
-schema_version: 1
-defaults:
-  versions: [latest, master]
-redirects:
-  - from: /rllib/rllib-algorithms.html
-    to:   /rllib/algorithms.html
-    type: exact
-```
-
-Expands to four RtD records: `/en/latest/rllib/rllib-algorithms.html`, `/en/master/rllib/rllib-algorithms.html`, both pointing at their version-matched `/en/<v>/rllib/algorithms.html`.
-
-### Per-entry `versions:` override
-
-```yaml
-schema_version: 1
-defaults:
-  versions: [latest, master]
-redirects:
-  - from: /data/old.html
-    to:   /data/new.html
-    type: exact
-    versions: [latest]   # override: only redirect on latest, not master
-```
-
-### Cross-product (sources × versions)
-
-```yaml
-schema_version: 1
-redirects:
-  - from:
-      - /old1.html
-      - /old2.html
-    to: /new.html
-    type: exact
-    versions: [latest, master]
-```
-
-Expands to four records: latest×{old1, old2} and master×{old1, old2}.
 
 ### Cross-host destination
 
@@ -426,29 +336,26 @@ redirects:
     to:   /en/latest/:splat
     type: exact
 
-  # Combine with version expansion: one rule × N versions.
+  # The same move on every version, firing only where the old path 404s.
   - from: /rllib/rllib/*
     to:   /rllib/:splat
-    type: exact
-    versions: [latest, master]
+    type: page
 ```
 
 The tool is a string passthrough for URL fields — `*` and `:splat` are stored as-is and interpreted by RtD at request time. Useful for the cohort cutover (legacy version slug → current) and prefix-collapse renames.
 
 ### `page` redirects apply across all versions automatically
 
-A `page` redirect with `from: /old.html, to: /new.html` triggers on `/en/latest/old.html`, `/en/master/old.html`, every legacy version — **RtD handles the fan-out itself**. Don't pair `page` with `versions:` or `defaults.versions`; the tool ignores `defaults.versions` for `page` entries, and an explicit `versions:` raises a parse error.
+A `page` redirect with `from: /old.html, to: /new.html` triggers on `/en/latest/old.html`, `/en/master/old.html`, every legacy version — **RtD handles the fan-out itself**. To target specific versions instead, write one `exact` rule per version with a fully-qualified `from`:
 
 ```yaml
 schema_version: 1
-defaults:
-  versions: [latest, master]   # applies only to `exact` entries below
 redirects:
-  - from: /old.html             # page: ignores defaults.versions
+  - from: /old.html                  # page: every version
     to:   /new.html
     type: page
-  - from: /api.html             # exact: fans out to latest and master
-    to:   /api-v2.html
+  - from: /en/latest/api.html        # exact: latest only
+    to:   /en/latest/api-v2.html
     type: exact
 ```
 
@@ -530,34 +437,24 @@ One rule, applied semantically — newer versions get the redirect, older versio
 
 Use `force: true` only when you specifically want to override an existing page — e.g., taking over a path that still exists in current docs but should now point elsewhere. Default `force: false` is almost always what you want for IA cleanup.
 
-### Custom language prefix
+### Removed in 0.3.0
 
-The URL language segment is configurable per file. Default is `/en`.
+Two features built for designs that didn't ship were removed in 0.3.0. A file that still uses them fails to parse with an error that says how to rewrite it.
 
-```yaml
-schema_version: 1
-language_prefix: /de
-defaults:
-  versions: [latest]
-redirects:
-  - from: /alt.html
-    to:   /neu.html
-    type: exact
-```
+- **Multi-version expansion.** Top-level `defaults.versions` and per-entry `versions:` fanned a path-only `exact` rule out across versions. Use a version-less `page` rule instead, which RtD applies on every version and which fires only where the page 404s. See [Robust fan-out](#robust-fan-out-page--force-false--splat). When a rule must target specific versions, write one `exact` entry per version with a fully-qualified `from`, such as `/en/latest/old.html`.
+- **Multi-file composition.** `plan`, `apply`, `audit`, `diff-file`, and `simulate` take a single `--file`. `validate --composed` and the `rtd-redirects-validate-composed` pre-commit hook are gone. Merge the files into one, keeping the earlier file's rules first. `validate` still accepts several files and checks each on its own.
 
-Languageless RtD setups (no language segment) are not yet supported — see [`AGENTS.md`](AGENTS.md) for the deferred-work catalog.
+The top-level `language_prefix:` key still parses so existing files keep working, but nothing reads it now that expansion is gone.
 
 ### Field reference
 
 | YAML field | RtD field | Default | Notes |
 |---|---|---|---|
 | `schema_version` | n/a | required | Top-level. Currently `1`. |
-| `language_prefix` | n/a | `/en` | Top-level. URL segment between host and version. |
-| `defaults.versions` | n/a | unset | Active version list for entries that inherit. |
+| `language_prefix` | n/a | `/en` | Top-level. Accepted for compatibility; unused since 0.3.0. |
 | `from` | `from_url` | required for `page` and `exact` | String or list. Must be a project path, not external. Optional for `clean_url_to_html` / `html_to_clean_url`. |
 | `to` | `to_url` | required for `page` and `exact` | String. Path-only, fully-qualified, or external (`https://`, `mailto:`, etc.). Optional for `clean_url_to_html` / `html_to_clean_url`. |
-| `type` | `type` | required | One of `page`, `exact`, `clean_url_to_html`, `html_to_clean_url`. Only `exact` uses `versions:` / `defaults.versions`; the others apply project-wide on RtD's side. |
-| `versions` | n/a (expansion input) | falls back to `defaults.versions` | List of plain version names. Pattern identifiers (globs, ranges, exclusions, macros) are not yet supported. Only valid on `type: exact`. |
+| `type` | `type` | required | One of `page`, `exact`, `clean_url_to_html`, `html_to_clean_url`. `exact` matches the full `/<lang>/<version>/...` path; the others apply on every version. |
 | `status` | `http_status` | `301` | 3xx code. |
 | `force` | `force` | `false` | |
 | `enabled` | `enabled` | `true` | |

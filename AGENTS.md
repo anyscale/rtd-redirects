@@ -17,7 +17,7 @@ Anchor docs (in the `anyscale/docs` repo, not this one):
 
 ## OSS posture
 
-Public repo, MIT-licensed, Anyscale-opinionated (PRD Option B). The tool ships publicly and any RtD project can adopt it, but the default ergonomics (301 status, `/en` language prefix, multi-source / multi-version expansion, `/en/<version>/` URL detection) reflect Ray's setup. Bug reports welcome; generalization work is best-effort.
+Public repo, MIT-licensed, Anyscale-opinionated (PRD Option B). The tool ships publicly and any RtD project can adopt it, but the default ergonomics (301 status, `/en` language prefix, multi-source expansion, `/en/<version>/` URL detection) reflect Ray's setup. Bug reports welcome; generalization work is best-effort.
 
 Revisit to "Option A" (full OSS, actively generalized) only if outside adoption interest materializes.
 
@@ -30,11 +30,11 @@ The MVP was ~1000 LOC across nine modules; `simulate` added three more. Each is 
 | `model.py` | `Redirect` dataclass + `RedirectSet`. Identity is `(from_url, type)`. |
 | `exceptions.py` | `ParseError` — shared between `parse` and `expand` to avoid a circular import. |
 | `client.py` | `RtdClient`. Token-bucket rate limit (60 rpm), pagination, 429 retry with `Retry-After`, CRUD on `/projects/<slug>/redirects/`, list on `/projects/<slug>/versions/`. |
-| `parse.py` | YAML reader. Schema validation. Routes expansion-shaped entries to `expand`. Exposes `parse_file`, `parse_files`, `parse_text`, and `compose` (ordered multi-file composition with global position reindex; file order is meaningful). |
-| `expand.py` | Multi-source and multi-version fan-out. Path-only-vs-fully-qualified detection. Configurable `language_prefix`. |
-| `collapse.py` | Dump-time inverse of `expand`. Groups canonical records into ergonomic YAML entries. Tier 1 only — see Deferred work below. |
+| `parse.py` | YAML reader. Schema validation. Routes list-valued `from:` entries to `expand`. Exposes `parse_file` and `parse_text`. Rejects the removed `defaults:` and `versions:` keys with a migration message. |
+| `expand.py` | Multi-source fan-out: one record per `from:` list item. Also home to `is_external` and `DEFAULT_LANGUAGE_PREFIX`. |
+| `collapse.py` | Dump-time inverse of `expand`. Groups records that differ only in `from_url` into one multi-source entry. |
 | `diff.py` | `Diff` of two `RedirectSet`s. Categories: adds / updates / deletes / reorders. |
-| `diff_file.py` | Git-only PR-time diff. Reads YAML at two refs via `git show`, runs each through `parse_text`, returns a `Diff`. No API. |
+| `diff_file.py` | Git-only PR-time diff. Reads one YAML file at two refs via `git show` (`parse_at_ref`), runs each through `parse_text`, returns a `Diff`. No API. |
 | `apply.py` | Drives a `Diff` against `RtdClient` in safe order: deletes → adds → updates → reorders. Per-entry stderr audit log. |
 | `validate.py` | Rules-based ordering and chain detection over a `RedirectSet`. Flags unreachable rules (specific-with-higher-position-than-general) as errors, and chain candidates (A.to matches B.from) tiered by whether they chain on every version: `warning` when B is `force: true`, `info` when B is `force: false` (fires only where A's target 404s, which varies by version) or when a lower-position rule preempts a splat from reaching B. |
 | `resolve.py` | Request-time model of RtD redirect resolution. `Resolver` follows one URL on one version through a `RedirectSet` against per-version page sets: first match by position, `force: false` only on 404, `page` vs `exact` matching, `:splat`, version-switching targets, loop detection. Shared engine for any check that asks where a URL lands. |
@@ -47,11 +47,11 @@ The MVP was ~1000 LOC across nine modules; `simulate` added three more. Each is 
 - **Identity is `(from_url, type)`**, not the API `pk`. Same data identifies the same record whether it came from YAML or RtD.
 - **`pk` is excluded from `Redirect.__eq__`** (via `field(compare=False)`). YAML-parsed records (no `pk`) compare cleanly against API-fetched records (`pk` set).
 - **External `from` URLs are rejected** at parse time. RtD can only intercept requests for paths it serves. External `to` URLs are fully supported (cross-host redirects to `docs.anyscale.com`, blog posts, `mailto:`, etc.).
-- **`language_prefix` is configurable** per YAML file. Hard-coded `/en/` is not assumed anywhere except as a default.
+- **`/en` is a default, not an assumption.** `validate`, `resolve`, and `simulate` take a `language_prefix` parameter. The YAML `language_prefix:` key still parses but is unused since 0.3.0; it only fed multi-version expansion.
 - **`apply` runs in safe order**: deletes free identities; adds create; updates settle data; reorders fix positions last so the position counter doesn't churn during data changes.
 - **Reorders are mutually exclusive with updates** — a position-plus-other-field change is an update (one PUT sets both); a position-only change is a reorder.
 - **Duplicate identities are tolerated on read and healed by `apply`, but rejected in authored YAML.** RtD permits them; the tool doesn't. See [Duplicate identities](#duplicate-identities) below.
-- **Multiple files compose as one ordered source of truth.** `parse_files` / `compose` treat file order as meaningful (earlier files position before later ones) and reindex the composed set globally to `0..N-1`, so per-file positions that each start at zero can't produce ambiguous ordering. A single file is never reindexed. Duplicate identities are rejected across files, not just within one. `plan` / `apply` / `audit` / `diff-file` take an ordered `--file` list; `validate --composed` runs the same composition through the credential-free validator. Built for a Ray `master.yaml`-before-`current.yaml` release-staging model (DOC-1298). Ray dropped that model on 2026-09-30 (DOC-1301, Won't Do) because `force: false` page rules already stage renames per version, so composition has no Ray user today.
+- **One file is one redirect set.** Ordered multi-file composition and multi-version expansion (`versions:`, `defaults.versions`) were removed in 0.3.0. Both were built for Ray designs that didn't ship: the `master.yaml`-before-`current.yaml` staging model (DOC-1298, then DOC-1301 Won't Do) and `exact` rules fanned across `latest` and `master`. Version-less `page` rules with `force: false` replaced both, because they take effect on each version as the move reaches it ([DOC-1713](https://anyscale1.atlassian.net/browse/DOC-1713)). Don't reintroduce either without a concrete user.
 
 ### Duplicate identities
 
@@ -72,7 +72,7 @@ RtD's current v3 API supports exactly four redirect types. Our `model.REDIRECT_T
 | `clean_url_to_html` | no (`URL_STYLE_TYPES`) | project-wide URL transition | `/page/` → `/page.html` style switch |
 | `html_to_clean_url` | no (`URL_STYLE_TYPES`) | project-wide URL transition | `/page.html` → `/page/` style switch |
 
-**Critical consequence**: only `type: exact` uses `versions:` / `defaults.versions`. `page` and the URL-style types skip our expansion logic entirely — RtD's API handles fan-out across versions on its side. Mixing `page` and `exact` under one `defaults.versions` is the natural authoring pattern; the tool routes each through the correct path automatically.
+**Critical consequence**: `page` and the URL-style types apply on every version on RtD's side. An `exact` rule names its version in a fully-qualified `from`, one entry per version.
 
 **Wildcards**: `*` is allowed only as a *suffix* in `from_url`. `:splat` in `to_url` substitutes the matched portion. The tool is a string passthrough for these — they're stored verbatim and interpreted by RtD at request time.
 
@@ -162,22 +162,16 @@ Captured here so it doesn't get lost. Listed in rough priority order.
 
 ### Feature gaps in the tool
 
-1. **Multi-version collapse (Tier 2 in `collapse.py`)** — currently `collapse` only does multi-source grouping. Tier 2 detects records that differ only in their language/version prefix and factors them into `versions:` lists. Useful once IA-cleanup PRs have shipped real expanded records to fold back. Validate against a real `dump` after the first IA pass.
-1. **Pattern version identifiers in `expand.py`** — glob (`v2.5*`), semver range (`>=v2.50`), exclusion (`!v2.54`), macro (`@active`). Currently raise "not yet supported". Adding requires:
-   - Live version list resolution: thread `RtdClient.list_versions` (already implemented) through to `expand_entry` via a `version_resolver: Callable[[], list[str]] | None` parameter.
-   - Pattern parsing per the table in `redirect-mgmt/design.md` §"Multi-version".
-   - Caching: design says "for the duration of a single command invocation".
 1. **Languageless URL prefix (`language_prefix=""`)** — rejected today. Supporting it needs path-only-vs-fully-qualified detection without a language segment. Options:
    - Require explicit `known_versions:` list at YAML top level.
-   - Infer from `defaults.versions` + per-entry `versions:`.
-   - Use live version list (same lift as the pattern-identifier feature).
+   - Use the live version list (`RtdClient.list_versions` already exists).
    Pre-requisite if `docs.ray.io` ever drops `/en`. Note: the *migration* from `/en/...` to `/...` can be done today with a single suffix-wildcard exact redirect (`/en/*` → `/:splat`); the deferred work is ongoing YAML authoring AFTER the prefix is gone.
 1. **Wildcard `*` placement validation** — RtD only accepts suffix wildcards. We pass URL strings through without checking; an infix or prefix `*` (e.g. `/foo/*/bar`) would be rejected by the API at apply time with a clearer error than we could give. Could add a parse-time check, but the cost/benefit is marginal — agents writing redirects rarely make this mistake, and RtD's error is informative.
 1. **Validator follow-ups**. The first cut of `validate.py` covers ordering (specific-must-come-first) and chain candidates (A.to overlaps B.from). Future work that builds on the same Pattern machinery:
    - **Cycle detection** — A.to matches B.from, B.to matches A.from. Today this surfaces as two separate chain findings; a cycle-aware pass could flag the loop explicitly so the operator sees it as one finding instead of N.
    - **Wildcard `*` placement** — RtD rejects prefix and infix wildcards. Today the API returns the error at apply time; the validator could catch it at parse time with a clearer message.
    - **Per-URL chain precision** — candidates are tiered `warning` vs `info` by `force`, and per-version correctness is `simulate`'s job. Still open: resolving the substituted `:splat` URL against B's pattern to drop overlaps that can't occur.
-   - **Multiple language prefixes** — when a project hosts multiple language variants, the validator should accept a list of language prefixes or resolve them from the YAML's per-file `language_prefix:`. Today it takes a single prefix.
+   - **Multiple language prefixes** — when a project hosts multiple language variants, the validator should accept a list of language prefixes. Today it takes a single prefix.
 1. **`simulate` follow-ups** ([DOC-1712](https://anyscale1.atlassian.net/browse/DOC-1712)):
    - **`--live` spot check** — request a sample of the predicted URLs against the real site and compare final URL and hop count, as the prototype's validation did. Only meaningful after `apply`, so it fits a post-apply audit better than the pre-push gate.
    - **Coverage guard on the same engine** — [DOC-1697](https://anyscale1.atlassian.net/browse/DOC-1697)'s removed-URL guard asks "is this removed URL covered?"; `resolve.Resolver` already answers it. Build the guard on the resolver rather than a second matcher.
