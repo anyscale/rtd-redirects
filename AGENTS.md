@@ -48,7 +48,7 @@ The MVP is ~1000 LOC across nine modules. Each is documented at the top of the f
 - **`apply` runs in safe order**: deletes free identities; adds create; updates settle data; reorders fix positions last so the position counter doesn't churn during data changes.
 - **Reorders are mutually exclusive with updates** — a position-plus-other-field change is an update (one PUT sets both); a position-only change is a reorder.
 - **Duplicate identities are tolerated on read and healed by `apply`, but rejected in authored YAML.** RtD permits them; the tool doesn't. See [Duplicate identities](#duplicate-identities) below.
-- **Multiple files compose as one ordered source of truth.** `parse_files` / `compose` treat file order as meaningful (earlier files position before later ones) and reindex the composed set globally to `0..N-1`, so per-file positions that each start at zero can't produce ambiguous ordering. A single file is never reindexed. Duplicate identities are rejected across files, not just within one. `plan` / `apply` / `audit` / `diff-file` take an ordered `--file` list; `validate --composed` runs the same composition through the credential-free validator. Built for Ray's `master.yaml`-before-`current.yaml` release-staging model (DOC-1298, consumed by DOC-1301/DOC-1142).
+- **Multiple files compose as one ordered source of truth.** `parse_files` / `compose` treat file order as meaningful (earlier files position before later ones) and reindex the composed set globally to `0..N-1`, so per-file positions that each start at zero can't produce ambiguous ordering. A single file is never reindexed. Duplicate identities are rejected across files, not just within one. `plan` / `apply` / `audit` / `diff-file` take an ordered `--file` list; `validate --composed` runs the same composition through the credential-free validator. Built for a Ray `master.yaml`-before-`current.yaml` release-staging model (DOC-1298). Ray dropped that model on 2026-09-30 (DOC-1301, Won't Do) because `force: false` page rules already stage renames per version, so composition has no Ray user today.
 
 ### Duplicate identities
 
@@ -64,8 +64,8 @@ RtD's current v3 API supports exactly four redirect types. Our `model.REDIRECT_T
 
 | Type | `from`/`to` required? | Version semantics | Use case |
 |---|---|---|---|
-| `page` | yes | **applies across all versions automatically** (`VERSION_AGNOSTIC_TYPES`) | path rename that should hit every version RtD serves |
-| `exact` | yes | per-URL match including version segment | path rename scoped to specific version(s); the IA-cleanup workhorse |
+| `page` | yes | **applies across all versions automatically** (`VERSION_AGNOSTIC_TYPES`) | path rename that should hit every version RtD serves; the IA-cleanup workhorse, because `force: false` makes it fire only where the old path 404s |
+| `exact` | yes | per-URL match including version segment | path rename scoped to specific version(s) |
 | `clean_url_to_html` | no (`URL_STYLE_TYPES`) | project-wide URL transition | `/page/` → `/page.html` style switch |
 | `html_to_clean_url` | no (`URL_STYLE_TYPES`) | project-wide URL transition | `/page.html` → `/page/` style switch |
 
@@ -77,7 +77,7 @@ RtD's current v3 API supports exactly four redirect types. Our `model.REDIRECT_T
 
 **Inactive versions and slug renames**: deactivating a version on RtD deletes its artifacts and serves 404 for its URLs. Slug renames have the same effect on old-slug URLs. Because `force: false` is the default and redirects fire on 404, both events automatically route the affected URLs through any matching wildcard or page redirect. This is a feature, not a bug — designers can defer "what happens to legacy version URLs" until they're ready to deactivate.
 
-**Chains**: RtD doesn't promise server-side chain resolution. If `/a → /b` and `/b → /c` are configured, the browser follows both 3xx responses. Author each `from` pointing at the *final* `to`. RtD's infinite-redirect detector returns 404 as a failsafe but isn't a substitute for clean authoring. Today's `validate.py` flags chain candidates as warnings.
+**Chains**: RtD doesn't promise server-side chain resolution. If `/a → /b` and `/b → /c` are configured, the browser follows both 3xx responses. Author each new rule's `to` pointing at the *final* destination, but don't flatten an existing rule when its destination moves in newer versions only. Older versions still serve the old destination, so the kept chain is correct. See the README's "Avoid chained redirects". RtD's infinite-redirect detector returns 404 as a failsafe but isn't a substitute for clean authoring. Today's `validate.py` flags chain candidates as warnings.
 
 ### Local validation and pre-commit
 
