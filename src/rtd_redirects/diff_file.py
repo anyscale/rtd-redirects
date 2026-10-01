@@ -1,4 +1,4 @@
-"""Compute a redirect-level diff between two git refs of YAML file(s).
+"""Compute a redirect-level diff between two git refs of a YAML file.
 
 The engine behind the ``diff-file`` subcommand and the PR-time CI check.
 Reads the YAML at ``base_ref`` and ``head_ref`` via ``git show``, parses
@@ -6,14 +6,8 @@ both through ``parse_text``, and returns a ``Diff`` that describes what
 the PR proposes — no RtD API calls, so the check stays independent of
 external service health and can run on PRs that have no RtD credentials.
 
-Accepts an ordered list of files and composes each ref's set the same way
-``parse_files`` does: earlier files position before later ones, globally
-reindexed. This is how a PR that touches ``master.yaml`` and ``current.yaml``
-gets diffed against the composed live order rather than each file in
-isolation. A single file keeps its authored positions untouched.
-
-Files that don't exist at a given ref (e.g. new file in head, deleted in
-head) are treated as empty so the diff cleanly shows pure adds or pure
+A file that doesn't exist at a given ref (e.g. new file in head, deleted in
+head) is treated as empty so the diff cleanly shows pure adds or pure
 deletes.
 """
 
@@ -21,12 +15,11 @@ from __future__ import annotations
 
 import shutil
 import subprocess
-from collections.abc import Sequence
 from pathlib import Path
 
 from rtd_redirects.diff import Diff, diff
 from rtd_redirects.model import RedirectSet
-from rtd_redirects.parse import compose, parse_text
+from rtd_redirects.parse import parse_text
 
 
 class GitError(Exception):
@@ -34,7 +27,7 @@ class GitError(Exception):
 
 
 def diff_file(
-    file_paths: str | Path | Sequence[str | Path],
+    file_path: str | Path,
     *,
     base_ref: str = "origin/master",
     head_ref: str = "HEAD",
@@ -49,47 +42,27 @@ def diff_file(
     - ``updates`` lists records the PR modifies in any non-position field,
     - ``reorders`` lists records whose position the PR changes.
 
-    ``file_paths`` is a single path or an ordered list of paths, each relative
-    to the repo root (git's ``<ref>:<path>`` syntax doesn't accept absolute
-    paths). Multiple files compose in the given order on both sides before
-    diffing. ``repo_path`` selects the repository to query; ``None`` uses the
-    current working directory.
+    ``file_path`` is relative to the repo root (git's ``<ref>:<path>`` syntax
+    doesn't accept absolute paths). ``repo_path`` selects the repository to
+    query; ``None`` uses the current working directory.
     """
-    if isinstance(file_paths, (str, Path)):
-        paths = [Path(file_paths)]
-    else:
-        paths = [Path(p) for p in file_paths]
-
-    base_set = compose_at_ref(paths, base_ref, repo_path)
-    head_set = compose_at_ref(paths, head_ref, repo_path)
-
+    path = Path(file_path)
+    base_set = parse_at_ref(path, base_ref, repo_path)
+    head_set = parse_at_ref(path, head_ref, repo_path)
     return diff(head_set, base_set)
 
 
-def compose_at_ref(
-    paths: Sequence[Path],
+def parse_at_ref(
+    path: str | Path,
     ref: str,
-    repo_path: str | Path | None,
+    repo_path: str | Path | None = None,
 ) -> RedirectSet:
-    """Parse and compose every path that exists at ``ref`` into one set.
-
-    Paths missing at the ref are skipped (treated as empty), so a file added or
-    deleted by the PR shows as pure adds or deletes. A single present file keeps
-    its authored positions; multiple compose via :func:`compose` in list order.
-    """
-    named: list[tuple[str, RedirectSet]] = []
-    for path in paths:
-        text = _read_at_ref(path, ref, repo_path)
-        if text is None:
-            continue
-        label = f"{ref}:{path}"
-        named.append((label, parse_text(text, source=label)))
-
-    if not named:
+    """Parse the YAML file at ``ref``, or return an empty set if it's absent there."""
+    path = Path(path)
+    text = _read_at_ref(path, ref, repo_path)
+    if text is None:
         return RedirectSet()
-    if len(named) == 1:
-        return named[0][1]
-    return compose(named)
+    return parse_text(text, source=f"{ref}:{path}")
 
 
 _MISSING_PATH_MARKERS = (

@@ -11,10 +11,9 @@ canonical ``RedirectSet`` obtained by parsing the collapsed YAML equals the
 input set. ``--no-collapse`` callers can iterate the input directly instead
 of routing through this module.
 
-Tier 1 (this iteration): multi-source collapse only. Tier 2 (follow-up
-PR): multi-version collapse — records that differ only in their language /
-version prefix factored into a single entry with ``versions:`` as a list and
-path-relative ``from:`` / ``to:``.
+Collapse is multi-source only. Records that differ only in their version
+segment stay separate entries, since multi-version expansion was removed in
+0.3.0.
 """
 
 from __future__ import annotations
