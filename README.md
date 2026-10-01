@@ -240,6 +240,67 @@ This catches ordering errors that exist only after composition — a specific ru
 
 `--fix` rewrites the YAML using the parsed `RedirectSet`, which loses comments and authoring formatting (`schema_version`, `language_prefix`, and `defaults` are preserved). Run `--fix`, review the diff, and commit. The reordering is deterministic — sorted by `(specificity, original position, from_url, type)` — so re-running on a clean file is a no-op.
 
+### `simulate`
+
+Replay URLs through the redirect rules before and after a change, on every version in a matrix, and report where each one lands. **No RtD credentials required.**
+
+`validate` checks a rule set on its own. A page-rename change can pass it with no errors and still send readers to a landing page, a 404, or a loop, because `force: false` rules fire only where a page is missing, and which pages are missing differs by version. `simulate` answers the question a rename PR needs answered: for every old URL, where does it land after this change, in how many hops, and is that the same page it reached before?
+
+```bash
+rtd-redirects simulate --file doc/redirects/current.yaml --base origin/master --head HEAD \
+    --pages-before master=inv:https://docs.ray.io/en/master/objects.inv \
+    --pages-after master=html:doc/_build/html \
+    --pages latest=inv:https://docs.ray.io/en/latest/objects.inv \
+    --pages releases-2.40.0=inv:https://docs.ray.io/en/releases-2.40.0/objects.inv \
+    --prefix /ray-core/ --git-renames doc/source
+```
+
+**Rules.** `--file` reads the redirect file(s) at `--base` for the before side and `--head` for the after side, composing multiple files in order. `--head WORKTREE` reads the files on disk. `--before-file` and `--after-file` take on-disk files directly instead.
+
+**Version matrix.** Each version needs a page set before and after the change. `--pages VERSION=SOURCE` sets both sides; `--pages-before` and `--pages-after` override one side. A version the change doesn't touch, such as an older release, uses `--pages` alone. Include `master`, `latest`, and at least one older release: a rule repointed at a moved page's new path is right on `master` and breaks on every version that doesn't have the move, so a matrix without older releases can't see it. `simulate` prints a note when the matrix has fewer than three versions.
+
+A page set source is one of the following:
+
+| Source | Reads | Notes |
+|---|---|---|
+| `html:DIR` | Every `*.html` file in a built HTML directory. | The most faithful source for a local build. |
+| `inv:PATH_OR_URL` | Every `std:doc` entry in a Sphinx `objects.inv`. | Includes build-generated pages. RtD serves one per version, so it's the cheapest faithful source for a published version. |
+| `sitemap:PATH_OR_URL` | Every `<loc>` in a `sitemap.xml`, with the host and any `/<lang>/<version>` prefix stripped. | |
+| `git:REF:SRCDIR` | Each `.md`, `.rst`, or `.ipynb` file under `SRCDIR` at `REF`, mapped to `.html`. `REF` may be `WORKTREE`. | Cheap, but misses generated pages such as API stubs, which then read as 404s. |
+| `list:PATH` | One path per line. | |
+
+Compare like with like on each version. A git tree has no generated pages, so if one side is `git:` and the other a build, such as `inv:` or `html:`, every generated page looks added or removed by the change. `simulate` prints a note when that happens.
+
+**Test URLs.** By default `simulate` tests every rule's `from` URL on both sides, with wildcards instantiated by a sample page name. `--prefix PATH` adds every page under `PATH` in any version's before set; for a directory move, pass the old directory. `--url` and `--urls-file` add explicit URLs. A `/<lang>/<version>/` URL runs only on that version; a plain path runs on every version. `--no-rule-sources` turns off the default set.
+
+**Judging.** For each URL and version, `simulate` resolves both sides and assigns a verdict:
+
+| Verdict | Meaning | Fails? |
+|---|---|---|
+| `regression` | Resolved before, doesn't after: a 404, a loop, or neither. | yes |
+| `wrong-landing` | Resolves on both sides, but after lands somewhere other than the expected page. | yes |
+| `new-loop` | Unresolved before, loops after. | yes |
+| `unmapped` | Resolves on both sides, but the before landing no longer exists and no rename says where it went. | no |
+| `fixed` | Unresolved before, resolves after. | no |
+| `unresolved` | Unresolved on both sides. | no |
+| `unverified` | A redirect jumps to a version outside the matrix. | no |
+| `ok` | Lands on the expected page. | no |
+
+The expected page is the before landing if it still exists after the change. Otherwise it's that landing mapped through the renames. `--git-renames SRCDIR` derives renames from git renames of Sphinx sources between `--base` and `--head`. `--rename-map FILE` takes a YAML map of old to new page paths, where a key ending in `*` maps a prefix with `:splat`:
+
+```yaml
+/ray-core/*: /core/:splat
+/core/actors.html: /core/actors/index.html
+```
+
+Renames compose, so the two entries above send `/ray-core/actors.html` to `/core/actors/index.html`. Comparison is on the landing version, so a rule that jumps from `/en/latest/` to an explicit `/en/master/` target is judged against `master`'s pages.
+
+Chains grow with each successive move, because existing rules keep their targets so older versions still resolve. `--hop-budget N` fails any URL whose after resolution needs more than `N` redirects. The report always lists URLs that need two or more. `--max-hops` (default 10) sets when a chain counts as a loop.
+
+Output is a text report per version, or `--format json` for the per-version counts plus every outcome that isn't a single-hop `ok`. The exit code is 6 when any URL fails, matching `validate`.
+
+The resolver models the semantics in [Wildcards](#wildcards--and-splat), [Rule ordering](#rule-ordering-specific-before-general), and [Robust fan-out](#robust-fan-out-page--force-false--splat): position-based first match, `force: false` firing only on a 404, `page` rules matching the path after `/<lang>/<version>`, `exact` rules matching the full path, a suffix `*` with `:splat`, fragments never matching server-side, and `/<lang>/<version>/` targets switching to that version's pages. Disabled rules and the URL-style types are ignored.
+
 ## Multiple files: ordered composition
 
 `plan`, `apply`, `audit`, and `diff-file` accept an ordered list of `--file` paths and compose them into one source of truth. `validate --composed` runs the same composition through the credential-free validator.
