@@ -4,7 +4,7 @@ Manage [Read the Docs](https://readthedocs.com/) redirects as code. A YAML file 
 
 ## Status
 
-v0.1.0 in development. Built for `docs.ray.io` IA-cleanup campaigns; the patterns generalize to any RtD project. Design rationale and full architecture are in [`anyscale/docs:strategy/ray-docs/redirect-mgmt/`](https://github.com/anyscale/docs/blob/master/strategy/ray-docs/redirect-mgmt/).
+In production on `docs.ray.io`. Ray's CI validates redirect changes at PR time and applies merged changes to the `anyscale-ray` project. If you're adding a redirect to the Ray docs, follow [`doc/redirects/README.md`](https://github.com/ray-project/ray/blob/master/doc/redirects/README.md) in `ray-project/ray`. Built for `docs.ray.io` IA-cleanup campaigns; the patterns generalize to any RtD project. Design rationale and full architecture are in [`anyscale/docs:strategy/ray-docs/redirect-mgmt/`](https://github.com/anyscale/docs/blob/master/strategy/ray-docs/redirect-mgmt/).
 
 ## Why
 
@@ -78,6 +78,8 @@ version, for example `v0.2.0`.
    ```
 
 ## Quick start
+
+`validate`, `diff-file`, and `simulate` read only local files, git history, and public pages, and need no credentials. `list`, `dump`, `plan`, `audit`, and `apply` call the RtD API and need an `RTD_API_TOKEN` for a user with admin access to the project. An RtD token isn't scoped per permission. It carries its user's full role on the project, so a token that can run `plan` can also run `apply`. Keep tokens to the people and CI steps that apply changes.
 
 ```bash
 # Auth: token never goes to disk; read from 1Password (or your secret store) into env.

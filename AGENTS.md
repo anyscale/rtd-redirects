@@ -154,11 +154,9 @@ Reserve `exact` redirects for cases where you specifically need version-targeted
 
 Captured here so it doesn't get lost. Listed in rough priority order.
 
-### Operational follow-ups (no code work in this repo)
+### Ray rollout (done)
 
-1. **First real `dump` against `anyscale-ray`** — bootstrap the source-of-truth YAML for `ray-project/ray/doc/redirects/current.yaml`. Tracked under [DOC-928](https://anyscale1.atlassian.net/browse/DOC-928).
-1. **Buildkite integration (phase 2)** — PR-time `diff-file` step and merge-time `apply` step in `ray-project/ray/.buildkite/`. Path-filtered to `doc/redirects/**` so it adds no work to Ray's existing test graph. Lives in the Ray repo, not this one.
-1. **Bot-user provisioning handoff** — `anyscale-ray-docs-ops` RtD user provisioned by REEf + IT. Switch from personal admin token to bot-user token in 1Password and Buildkite secrets once landed.
+The operational rollout on `anyscale-ray` is complete, and nothing in it is deferred. `ray-project/ray/doc/redirects/current.yaml` is the source of truth. Ray Buildkite runs `validate` and `diff-file` on PRs that change it, with no token, and runs `apply --strict` on scheduled postmerge builds, using a dedicated bot token that only that step reads. The contributor guide is [`doc/redirects/README.md`](https://github.com/ray-project/ray/blob/master/doc/redirects/README.md) in the Ray repo. Change the Ray CI steps in `ray-project/ray/.buildkite/doc.rayci.yml`, not here. When a release changes CLI behavior that those steps or that README rely on, bump the pinned version in both.
 
 ### Feature gaps in the tool
 
@@ -185,12 +183,11 @@ Captured here so it doesn't get lost. Listed in rough priority order.
 These resolve during the rollout, not as code changes here:
 
 1. **RtD version-switcher behavior for renamed paths** — design.md §"Trade-offs the team should understand". Test during the week-3 backfill: when a user on `/en/latest/<renamed>` switches to a legacy version where that path doesn't exist, does RtD's version-switcher fall back gracefully? If not, file upstream or document the constraint.
-1. **Buildkite fork-PR policy** — need a Buildkite-specific answer for how fork PRs are handled for the redirect pipeline. The proposed step-level scoping keeps the apply step away from PR events entirely; verify that's sufficient.
 1. **Final tool/package name** — the repository and CLI keep the `rtd-redirects` name, but the PyPI distribution is `anyscale-rtd-redirects` because the `rtd-redirects` distribution name is already occupied.
 
 ## What lives where (anti-confusion)
 
 - **This repo (`anyscale/rtd-redirects`)** — the tool. Code, tests, packaging, this AGENTS.md.
 - **`anyscale/docs:strategy/ray-docs/redirect-mgmt/`** — the strategy and design. PRD, design doc, rollout plan, resolved decisions. Read this before making non-trivial design changes.
-- **`ray-project/ray/doc/redirects/`** — the YAML source of truth for `anyscale-ray`. Eventually contains `current.yaml` (post-backfill) plus the Buildkite pipeline integration.
+- **`ray-project/ray/doc/redirects/`** — the YAML source of truth for `anyscale-ray` (`current.yaml`) and the contributor guide (`README.md`). The Buildkite steps that validate and apply it live in `ray-project/ray/.buildkite/doc.rayci.yml`.
 - **DOC Jira project** — ticket tracking for the docs team's work. Each PR references `[DOC-XXX]`.
